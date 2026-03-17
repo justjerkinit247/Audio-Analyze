@@ -1,41 +1,19 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
 
-# Virtual environments
+---
+
+### `.gitignore`
+
+```gitignore
+__pycache__/
+*.pyc
 .venv/
 venv/
-env/
-
-# Environment / secrets
 .env
-.env.*
-
-# Test / cache
-.pytest_cache/
-.mypy_cache/
-.coverage
-htmlcov/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# OS/editor junk
 .DS_Store
-Thumbs.db
-.vscode/
+
+outputs/*.json
+outputs/*.csv
+outputs/*.txt
+
 .idea/
-
-# Audio/data you should NOT commit by default
-data/raw/
-outputs/*
-!outputs/.gitkeep
-
-# Large audio formats - keep these out unless they are tiny samples
-*.wav
-*.mp3
-*.flac
-*.aiff
-*.m4a
+.vscode/
