@@ -1,0 +1,18 @@
+{
+  "file_name": "addiction-adu.wav",
+  "file_stem": "addiction-adu",
+  "sample_rate": 48000,
+  "duration_seconds": 232.75083333333333,
+  "tempo_bpm": null,
+  "beats_detected": 583,
+  "pitch_estimate_hz": null,
+  "pitch_min_hz": null,
+  "pitch_max_hz": null,
+  "voiced_frame_ratio": 0.0,
+  "rms_mean": 0.16778944432735443,
+  "rms_max": 0.42061692476272583,
+  "zcr_mean": 0.05470170918352733,
+  "spectral_centroid_mean_hz": 3237.212602785365,
+  "spectral_rolloff_mean_hz": 7671.753986985014,
+  "source_path": "C:\\Users\\Tt-rexX\\Music\\addiction-adu.wav"
+}
