@@ -1,13 +1,32 @@
-from pathlib import Path
+﻿from pathlib import Path
 import numpy as np
 import librosa
 
 
 def _safe_float(value):
     try:
+        if value is None:
+            return None
+
+        if isinstance(value, np.ndarray):
+            if value.size == 0:
+                return None
+            value = np.asarray(value).squeeze()
+            if getattr(value, "ndim", 0) > 0:
+                value = value.flat[0]
+
         return float(value)
     except Exception:
         return None
+
+
+def _tempo_fallback_from_beats(beat_frames, duration_seconds):
+    try:
+        if duration_seconds and duration_seconds > 0 and beat_frames is not None and len(beat_frames) > 1:
+            return float(len(beat_frames) * 60.0 / duration_seconds)
+    except Exception:
+        pass
+    return None
 
 
 def analyze_audio_file(input_path):
@@ -50,12 +69,16 @@ def analyze_audio_file(input_path):
     except Exception:
         pass
 
+    tempo_bpm = _safe_float(tempo)
+    if tempo_bpm is None:
+        tempo_bpm = _tempo_fallback_from_beats(beat_frames, duration)
+
     result = {
         "file_name": input_path.name,
         "file_stem": input_path.stem,
         "sample_rate": int(sr),
         "duration_seconds": float(duration),
-        "tempo_bpm": _safe_float(tempo),
+        "tempo_bpm": tempo_bpm,
         "beats_detected": int(len(beat_frames)),
         "pitch_estimate_hz": pitch_estimate_hz,
         "pitch_min_hz": pitch_min_hz,
