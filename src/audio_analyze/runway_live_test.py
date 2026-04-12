@@ -4,6 +4,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import time
 
 import requests
@@ -12,6 +13,20 @@ API_BASE = "https://api.dev.runwayml.com"
 API_VERSION = "2024-11-06"
 SEED_DIR = Path("inputs/runway_seed_images")
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+RATIO_MAP = {
+    "9:16": "720:1280",
+    "16:9": "1280:720",
+    "1:1": "960:960",
+}
+VALID_RATIOS = {
+    "1280:720",
+    "720:1280",
+    "1104:832",
+    "960:960",
+    "832:1104",
+    "1584:672",
+}
 
 
 def load_payloads(payload_path):
@@ -38,7 +53,29 @@ def runway_headers():
     }
 
 
-def find_seed_image():
+def normalize_ratio(value):
+    ratio = RATIO_MAP.get(value, value)
+    if ratio not in VALID_RATIOS:
+        raise ValueError(
+            f"Unsupported ratio '{value}'. Use one of: {sorted(VALID_RATIOS)} or aliases {sorted(RATIO_MAP)}"
+        )
+    return ratio
+
+
+def sanitize_name(name):
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
+    return cleaned or "runway_output"
+
+
+def find_seed_image(seed_image=None):
+    if seed_image:
+        path = Path(seed_image)
+        if not path.exists():
+            raise FileNotFoundError(f"Seed image not found: {path.resolve()}")
+        if path.suffix.lower() not in ALLOWED_EXTS:
+            raise ValueError(f"Unsupported image type: {path.suffix}")
+        return path
+
     if not SEED_DIR.exists():
         raise FileNotFoundError(f"Seed image folder not found: {SEED_DIR.resolve()}")
 
@@ -61,12 +98,34 @@ def file_to_data_uri(path):
     return f"data:{mime_type};base64,{encoded}"
 
 
-def create_task(payload, prompt_image):
+def choose_payload(bundle, file_stem=None):
+    payloads = bundle.get("payloads", [])
+    if not payloads:
+        raise ValueError("No payloads found in bundle.")
+
+    if not file_stem:
+        return payloads[0]
+
+    target = file_stem.strip().lower()
+    for payload in payloads:
+        stem = str(payload.get("file_stem", "")).strip().lower()
+        if stem == target:
+            return payload
+        if target in stem or stem in target:
+            return payload
+
+    available = [p.get("file_stem") for p in payloads]
+    raise ValueError(f"Could not find payload for '{file_stem}'. Available: {available}")
+
+
+def create_task(payload, prompt_image, ratio_override=None):
+    ratio = normalize_ratio(ratio_override or payload.get("ratio", "1280:720"))
+
     body = {
         "model": payload["model"],
         "promptImage": prompt_image,
         "promptText": payload["promptText"],
-        "ratio": payload["ratio"],
+        "ratio": ratio,
         "duration": payload["duration"],
     }
 
@@ -79,7 +138,9 @@ def create_task(payload, prompt_image):
 
     if not response.ok:
         raise RuntimeError(
-            f"Runway create_task failed: HTTP {response.status_code}\n{response.text}"
+            f"Runway create_task failed: HTTP {response.status_code}\n"
+            f"{response.text}\n\n"
+            f"Submitted body:\n{json.dumps(body, indent=2)}"
         )
 
     data = response.json()
@@ -87,6 +148,7 @@ def create_task(payload, prompt_image):
         raise RuntimeError(
             f"Runway create_task returned no task id:\n{json.dumps(data, indent=2)}"
         )
+    data["submitted_body"] = body
     return data
 
 
@@ -129,30 +191,28 @@ def download_first_output(task_result, destination):
     return str(destination.resolve())
 
 
-def run_first_payload(payload_path, output_path):
+def run_selected_payload(payload_path, output_path, file_stem=None, seed_image=None, ratio=None):
     bundle = load_payloads(payload_path)
-    payloads = bundle.get("payloads", [])
-    if not payloads:
-        raise ValueError("No payloads found in bundle.")
+    payload = choose_payload(bundle, file_stem=file_stem).copy()
 
-    payload = payloads[0]
-    seed_image = find_seed_image()
-    prompt_image = file_to_data_uri(seed_image)
+    chosen_seed = find_seed_image(seed_image=seed_image)
+    prompt_image = file_to_data_uri(chosen_seed)
 
-    task_created = create_task(payload, prompt_image)
+    task_created = create_task(payload, prompt_image, ratio_override=ratio)
     task_id = task_created["id"]
     task_result = poll_task(task_id)
 
     downloaded_mp4 = None
     if task_result.get("status") == "SUCCEEDED":
+        stem = sanitize_name(payload.get("file_stem", "runway_output"))
         downloaded_mp4 = download_first_output(
             task_result,
-            Path("outputs/runway_video_run/downloads") / "benchmark_2_real_seed.mp4"
+            Path("outputs/runway_video_run/downloads") / f"{stem}.mp4"
         )
 
     result = {
         "file_stem": payload.get("file_stem"),
-        "seed_image_used": str(seed_image.resolve()),
+        "seed_image_used": str(chosen_seed.resolve()),
         "submitted_payload": payload,
         "task_created": task_created,
         "task_result": task_result,
@@ -164,15 +224,24 @@ def run_first_payload(payload_path, output_path):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Runway seed image test")
+    parser = argparse.ArgumentParser(description="Runway explicit payload + seed image test")
     parser.add_argument("--payloads", default="outputs\\runway_video_run\\runway_payloads.json")
     parser.add_argument("--output", default="outputs\\runway_video_run\\runway_live_test_result_seed_image.json")
+    parser.add_argument("--file-stem", help="Exact or partial file_stem to run")
+    parser.add_argument("--seed-image", help="Exact image path to use")
+    parser.add_argument("--ratio", default=None, help="Valid Runway ratio or alias like 9:16, 16:9, 1:1")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    result = run_first_payload(args.payloads, args.output)
+    result = run_selected_payload(
+        args.payloads,
+        args.output,
+        file_stem=args.file_stem,
+        seed_image=args.seed_image,
+        ratio=args.ratio,
+    )
     task_result = result["task_result"]
 
     print("Runway live seed-image test complete.")
