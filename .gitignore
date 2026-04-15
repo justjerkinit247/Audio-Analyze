@@ -1,6 +1,31 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 .venv/
 venv/
-outputs/*.json
+.pytest_cache/
 .DS_Store
+
+# Local generated outputs
+outputs/
+
+# Local archive exports
+archive/runway_generations/local_exports/
+
+# Local audio/video inputs
+inputs/audio/
+inputs/runway_seed_images/
+inputs/driving_performance/
+inputs/character_images/
+inputs/lip_sync_audio/
+
+# Common media artifacts
+*.mp4
+*.mov
+*.mkv
+*.mp3
+*.wav
+*.m4a
+*.png
+*.jpg
+*.jpeg
+*.webp
