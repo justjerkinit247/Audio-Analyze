@@ -4,3 +4,6 @@ soundfile
 scipy
 matplotlib
 pytest
+requests
+Pillow
+moviepy
