@@ -1,4 +1,5 @@
 from pathlib import Path
+import mimetypes
 import os
 import requests
 
@@ -36,27 +37,79 @@ class LTXClient:
             detail = response.text
         raise LTXError(f"{label} failed: HTTP {response.status_code}\n{detail}")
 
+    def _request_upload_slot(self, file_path):
+        """
+        Ask LTX for a signed upload URL.
+
+        LTX currently returns data shaped like:
+            {
+              "upload_url": "https://storage.googleapis.com/...",
+              "storage_uri": "ltx://...",
+              "required_headers": {"x-goog-content-length-range": "0,104857600"}
+            }
+
+        The generation endpoint wants the returned storage_uri, not the signed upload_url.
+        """
+        file_size = file_path.stat().st_size
+        mime_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        payload = {
+            "filename": file_path.name,
+            "file_name": file_path.name,
+            "size_bytes": file_size,
+            "content_type": mime_type,
+            "mime_type": mime_type,
+        }
+
+        # Some LTX accounts accept JSON metadata. If the endpoint ignores metadata,
+        # the response shape still provides upload_url/storage_uri.
+        response = self.session.post(
+            f"{self.BASE_URL}/v1/upload",
+            headers=self.json_headers,
+            json=payload,
+            timeout=(20, 180),
+        )
+        self._check(response, "LTX upload slot request")
+        return response.json()
+
+    def _put_signed_upload(self, upload_url, file_path, required_headers=None):
+        required_headers = required_headers or {}
+        headers = dict(required_headers)
+        headers.setdefault("Content-Type", mimetypes.guess_type(str(file_path))[0] or "application/octet-stream")
+
+        with file_path.open("rb") as f:
+            response = self.session.put(
+                upload_url,
+                headers=headers,
+                data=f,
+                timeout=(20, 300),
+            )
+        self._check(response, "LTX signed file upload")
+
     def upload_file(self, file_path):
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(file_path)
-        with file_path.open("rb") as f:
-            response = self.session.post(
-                f"{self.BASE_URL}/v1/upload",
-                headers=self.auth_headers,
-                files={"file": (file_path.name, f)},
-                timeout=(20, 180),
-            )
-        self._check(response, "LTX upload")
-        data = response.json()
+
+        data = self._request_upload_slot(file_path)
+
+        upload_url = data.get("upload_url")
+        storage_uri = data.get("storage_uri")
+        required_headers = data.get("required_headers") or {}
+
+        if upload_url and storage_uri:
+            self._put_signed_upload(upload_url, file_path, required_headers=required_headers)
+            return storage_uri
+
+        # Backward-compatible fallback for older/simple upload responses.
         for key in ("uri", "url", "file_url", "asset_url"):
             if isinstance(data.get(key), str):
                 return data[key]
+
         raise LTXError(f"Could not find uploaded file URI in response: {data}")
 
     def ensure_uri(self, value):
         value = str(value)
-        if value.startswith(("http://", "https://", "data:")):
+        if value.startswith(("http://", "https://", "data:", "ltx://")):
             return value
         return self.upload_file(value)
 
