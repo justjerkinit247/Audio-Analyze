@@ -165,12 +165,18 @@ def rebuild_prompt(original_prompt, scene_addon):
 
 def make_preview_report(plan, output_path):
     lines = []
+    prompt_maximizer = plan.get("prompt_maximizer", {})
     lines.append("# LTX Scene Control Preview")
     lines.append("")
     lines.append(f"Scene count: {len(plan.get('results', []))}")
+    if prompt_maximizer:
+        lines.append(f"Prompt max chars: {prompt_maximizer.get('max_chars')}")
+        lines.append(f"Prompt target chars: {prompt_maximizer.get('target_chars')}")
     lines.append("")
     for item in plan.get("results", []):
         assignment = item.get("seed_assignment", {})
+        prompt_max = item.get("prompt_maximizer", {})
+        prompt_chars = len(item.get("prompt_text", ""))
         lines.append(f"## Scene {int(item.get('clip_index', 0)):02d}")
         lines.append(f"Seed: {assignment.get('seed_file', item.get('seed_image_used'))}")
         lines.append(f"Method: {assignment.get('method')}")
@@ -178,9 +184,12 @@ def make_preview_report(plan, output_path):
             lines.append(f"Filename hint: {assignment['filename_prompt_hint']}")
         if assignment.get("scene_addon"):
             lines.append(f"Scene add-on: {assignment['scene_addon']}")
-        lines.append(f"Prompt chars: {len(item.get('prompt_text', ''))}")
+        lines.append(f"Prompt chars: {prompt_chars}")
+        if prompt_max:
+            lines.append(f"Prompt remaining chars: {prompt_max.get('remaining_chars')}")
+            lines.append(f"Prompt maximized: {prompt_max.get('enabled')}")
         lines.append("")
-    problems = plan.get("seed_mapping", {}).get("problems", [])
+    problems = plan.get("seed_mapping", {}).get("problems", []) + prompt_maximizer.get("problems", [])
     if problems:
         lines.append("## Notes / Problems")
         for problem in problems:
