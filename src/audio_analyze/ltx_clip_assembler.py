@@ -7,6 +7,8 @@ from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
 
 
 SCENE_NUMBER_RE = re.compile(r"(?:scene[_-]?)(\d+)", re.IGNORECASE)
+DEFAULT_TRIM_TAIL_SECONDS = 0.08
+DEFAULT_TRANSITION_SECONDS = 0.0
 
 
 def natural_scene_key(path):
@@ -37,13 +39,53 @@ def load_source_audio(plan_json):
     return Path(audio_path) if audio_path else None
 
 
-def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, start_seconds=0.0, duration_seconds=None, fps=24):
+def trim_clip_tail(clip, trim_tail_seconds):
+    trim_tail_seconds = max(0.0, float(trim_tail_seconds or 0.0))
+    if trim_tail_seconds <= 0:
+        return clip
+    if clip.duration <= trim_tail_seconds + 0.25:
+        return clip
+    return clip.subclipped(0, clip.duration - trim_tail_seconds)
+
+
+def add_crossfades(clips, transition_seconds):
+    """
+    Add soft visual crossfades when the installed MoviePy version supports them.
+
+    The assembler remains safe if crossfade support is unavailable: it raises a clear
+    error instead of silently producing an unexpected edit. Use --transition-seconds 0
+    for hard cuts with tail trimming only.
+    """
+    transition_seconds = max(0.0, float(transition_seconds or 0.0))
+    if transition_seconds <= 0 or len(clips) <= 1:
+        return clips, 0.0
+
+    faded = [clips[0]]
+    for clip in clips[1:]:
+        if hasattr(clip, "crossfadein"):
+            faded.append(clip.crossfadein(transition_seconds))
+        else:
+            try:
+                from moviepy.video.fx.CrossFadeIn import CrossFadeIn
+                faded.append(clip.with_effects([CrossFadeIn(transition_seconds)]))
+            except Exception as exc:
+                raise RuntimeError(
+                    "This MoviePy install does not expose crossfade support. "
+                    "Rerun with --transition-seconds 0 and use --trim-tail-seconds 0.08 for cleanup. "
+                    f"Original error: {exc}"
+                )
+    return faded, -transition_seconds
+
+
+def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, start_seconds=0.0, duration_seconds=None, fps=24, trim_tail_seconds=DEFAULT_TRIM_TAIL_SECONDS, transition_seconds=DEFAULT_TRANSITION_SECONDS):
     clip_paths = collect_mp4s(downloads_dir)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    video_clips = [VideoFileClip(str(path)) for path in clip_paths]
-    final_video = concatenate_videoclips(video_clips, method="compose")
+    raw_clips = [VideoFileClip(str(path)) for path in clip_paths]
+    video_clips = [trim_clip_tail(clip, trim_tail_seconds) for clip in raw_clips]
+    video_clips, padding = add_crossfades(video_clips, transition_seconds)
+    final_video = concatenate_videoclips(video_clips, method="compose", padding=padding)
 
     audio_source = Path(audio_path) if audio_path else load_source_audio(plan_json)
     audio_full = None
@@ -75,9 +117,13 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
         "audio_source": str(audio_source.resolve()) if audio_source and audio_source.exists() else None,
         "start_seconds": start_seconds,
         "duration_seconds": duration_seconds,
+        "trim_tail_seconds": trim_tail_seconds,
+        "transition_seconds": transition_seconds,
+        "transition_padding": padding,
+        "final_video_duration": round(float(final_video.duration), 3) if final_video else None,
     }
 
-    for clip in video_clips:
+    for clip in raw_clips:
         clip.close()
     if audio_clip:
         audio_clip.close()
@@ -97,6 +143,8 @@ def main():
     parser.add_argument("--start-seconds", type=float, default=0.0)
     parser.add_argument("--duration-seconds", type=float, default=None)
     parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument("--trim-tail-seconds", type=float, default=DEFAULT_TRIM_TAIL_SECONDS, help="Trim this much from the end of each clip before assembly to remove damaged terminal frames.")
+    parser.add_argument("--transition-seconds", type=float, default=DEFAULT_TRANSITION_SECONDS, help="Optional visual crossfade duration between clips. Use 0 for hard cuts.")
     args = parser.parse_args()
 
     info = merge_clips(
@@ -107,6 +155,8 @@ def main():
         start_seconds=args.start_seconds,
         duration_seconds=args.duration_seconds,
         fps=args.fps,
+        trim_tail_seconds=args.trim_tail_seconds,
+        transition_seconds=args.transition_seconds,
     )
 
     print("LTX clip assembly complete.")
