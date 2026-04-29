@@ -25,6 +25,8 @@ MAX_LTX_AUDIO_SECONDS = 20.0
 DEFAULT_SCENE_SECONDS = 8.0
 DEFAULT_MODEL = "ltx-2-3-pro"
 DEFAULT_GUIDANCE_SCALE = 9.0
+LTX_AUDIO_FORMAT = "FLAC"
+LTX_AUDIO_EXTENSION = ".flac"
 
 
 def write_json(path, data):
@@ -252,8 +254,8 @@ def export_scene_audio(source_audio_path, scene, output_dir, file_stem, clip_ind
     if y.ndim == 2:
         y = y.T
 
-    scene_audio = output_dir / f"{safe_name(file_stem)}_ltx_scene_{int(clip_index):02d}.wav"
-    sf.write(str(scene_audio), y, sr)
+    scene_audio = output_dir / f"{safe_name(file_stem)}_ltx_scene_{int(clip_index):02d}{LTX_AUDIO_EXTENSION}"
+    sf.write(str(scene_audio), y, sr, format=LTX_AUDIO_FORMAT)
     return str(scene_audio.resolve())
 
 
@@ -300,6 +302,7 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
         "seed_image_used": match["seed_image_used"],
         "source_audio_path": match["source_audio_path"],
         "scene_audio_path": scene_audio_path,
+        "scene_audio_format": LTX_AUDIO_FORMAT,
         "prompt_text": match["prompt_text"],
         "resolution": match["resolution"],
         "model": model,
