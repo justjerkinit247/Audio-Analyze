@@ -19,11 +19,19 @@ def scene_number_from_path(path):
     return None
 
 
+def safe_mtime(path):
+    try:
+        return Path(path).stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+
 def natural_scene_key(path):
+    path = Path(path)
     scene_number = scene_number_from_path(path)
     if scene_number is not None:
-        return scene_number, path.stat().st_mtime, path.name.lower()
-    return 9999, path.stat().st_mtime, path.name.lower()
+        return scene_number, safe_mtime(path), path.name.lower()
+    return 9999, safe_mtime(path), path.name.lower()
 
 
 def collect_mp4s(downloads_dir):
@@ -54,7 +62,7 @@ def select_latest_scene_clips(clip_paths, expected_scenes=None, strict_scenes=Fa
         by_scene.setdefault(scene_number, []).append(path)
 
     duplicate_scenes = {
-        scene: sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)
+        scene: sorted(paths, key=lambda p: safe_mtime(p), reverse=True)
         for scene, paths in by_scene.items()
         if len(paths) > 1
     }
@@ -62,7 +70,7 @@ def select_latest_scene_clips(clip_paths, expected_scenes=None, strict_scenes=Fa
     selected = []
     duplicate_notes = []
     for scene in sorted(by_scene):
-        newest = sorted(by_scene[scene], key=lambda p: p.stat().st_mtime, reverse=True)[0]
+        newest = sorted(by_scene[scene], key=lambda p: safe_mtime(p), reverse=True)[0]
         selected.append(newest)
         if scene in duplicate_scenes:
             duplicate_notes.append({
