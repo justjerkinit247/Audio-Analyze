@@ -2,7 +2,7 @@ from pathlib import Path
 import argparse
 import json
 
-from .ltx_seed_mapper import apply_seed_mapping, read_json, write_json
+from .ltx_seed_mapper import apply_seed_mapping, read_json, write_json, make_preview_report
 from .ltx_holy_cheeks_pipeline import run_preflight
 from .ltx_prompt_maximizer import maximize_plan_prompts, DEFAULT_PROMPT_MAX_CHARS, DEFAULT_PROMPT_TARGET_CHARS
 
@@ -82,11 +82,12 @@ def main():
     )
 
     if args.maximize_prompts:
-        maximize_plan_prompts(
+        plan = maximize_plan_prompts(
             plan_json=args.plan_json,
             max_chars=args.prompt_max_chars,
             target_chars=args.prompt_target_chars,
         )
+        make_preview_report(plan, args.preview_md)
 
     preflight = run_preflight(args.plan_json, args.preflight_output)
     status = build_scene_control_status(args.plan_json, args.preflight_output, args.status_output)
