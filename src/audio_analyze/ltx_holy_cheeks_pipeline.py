@@ -5,6 +5,7 @@ import re
 
 import librosa
 import numpy as np
+import soundfile as sf
 
 try:
     from .ltx_client import LTXClient
@@ -18,6 +19,9 @@ RESOLUTION_MAP = {
     "16:9": "1920x1080",
     "1:1": "1080x1080",
 }
+MIN_LTX_AUDIO_SECONDS = 2.0
+MAX_LTX_AUDIO_SECONDS = 20.0
+DEFAULT_SCENE_SECONDS = 8.0
 
 
 def write_json(path, data):
@@ -105,15 +109,21 @@ def analyze_audio(audio_path):
     }
 
 
-def build_scenes(duration_seconds, max_scenes=6):
-    scene_count = max(1, min(max_scenes, int(np.ceil(duration_seconds / 8.0))))
-    scene_len = duration_seconds / scene_count
+def build_scenes(duration_seconds, max_scenes=6, scene_seconds=DEFAULT_SCENE_SECONDS):
+    scene_seconds = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, float(scene_seconds)))
+    duration_seconds = float(duration_seconds)
+    scene_count = max(1, min(max_scenes, int(np.ceil(duration_seconds / scene_seconds))))
     scenes = []
+
     for i in range(scene_count):
-        start = i * scene_len
-        end = min(duration_seconds, (i + 1) * scene_len)
+        start = i * scene_seconds
+        end = min(duration_seconds, start + scene_seconds)
+        if end - start < MIN_LTX_AUDIO_SECONDS and scenes:
+            scenes[-1]["end"] = round(duration_seconds, 3)
+            scenes[-1]["duration"] = round(duration_seconds - scenes[-1]["start"], 3)
+            break
         scenes.append({
-            "scene_index": i + 1,
+            "scene_index": len(scenes) + 1,
             "start": round(start, 3),
             "end": round(end, 3),
             "duration": round(end - start, 3),
@@ -142,13 +152,13 @@ def build_prompt(file_stem, analysis, scene):
     )
 
 
-def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=6):
+def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=6, scene_seconds=DEFAULT_SCENE_SECONDS):
     audio_path = Path(audio_path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path.resolve()}")
     images = list_seed_images(seed_dir)
     analysis = analyze_audio(audio_path)
-    scenes = build_scenes(analysis["duration_seconds"], max_scenes=max_scenes)
+    scenes = build_scenes(analysis["duration_seconds"], max_scenes=max_scenes, scene_seconds=scene_seconds)
     resolution = normalize_resolution(resolution)
 
     results = []
@@ -157,7 +167,7 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
         results.append({
             "clip_index": idx,
             "file_stem": audio_path.stem,
-            "audio_path": str(audio_path.resolve()),
+            "source_audio_path": str(audio_path.resolve()),
             "seed_image_used": str(image.resolve()),
             "scene": scene,
             "resolution": resolution,
@@ -170,6 +180,7 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
         "analysis": analysis,
         "scene_count": len(results),
         "resolution": resolution,
+        "scene_seconds": scene_seconds,
         "results": results,
         "status": "planned",
     }
@@ -177,7 +188,28 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
     return plan
 
 
-def submit_one(plan_json, output_json, clip_index, model="ltx-2-3-pro", guidance_scale=9.0):
+def export_scene_audio(source_audio_path, scene, output_dir, file_stem, clip_index):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_audio_path = Path(source_audio_path)
+
+    start = float(scene["start"])
+    end = float(scene["end"])
+    duration = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, end - start))
+
+    y, sr = librosa.load(str(source_audio_path), sr=None, mono=False, offset=start, duration=duration)
+    if y.size == 0:
+        raise RuntimeError(f"Could not extract audio for scene {clip_index} from {source_audio_path}")
+
+    if y.ndim == 2:
+        y = y.T
+
+    scene_audio = output_dir / f"{safe_name(file_stem)}_ltx_scene_{int(clip_index):02d}.wav"
+    sf.write(str(scene_audio), y, sr)
+    return str(scene_audio.resolve())
+
+
+def submit_one(plan_json, output_json, clip_index, model="ltx-2-3-pro", guidance_scale=9.0, dry_run=False):
     plan = json.loads(Path(plan_json).read_text(encoding="utf-8-sig"))
     match = None
     for item in plan["results"]:
@@ -187,33 +219,48 @@ def submit_one(plan_json, output_json, clip_index, model="ltx-2-3-pro", guidance
     if match is None:
         raise ValueError(f"Clip index {clip_index} not found")
 
-    output_dir = Path(output_json).parent / "downloads"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    mp4_path = output_dir / f"{safe_name(match['file_stem'])}_ltx_scene_{int(clip_index):02d}.mp4"
+    output_root = Path(output_json).parent
+    downloads_dir = output_root / "downloads"
+    scene_audio_dir = output_root / "scene_audio"
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    scene_audio_dir.mkdir(parents=True, exist_ok=True)
 
-    client = LTXClient()
+    scene_audio_path = export_scene_audio(
+        source_audio_path=match["source_audio_path"],
+        scene=match["scene"],
+        output_dir=scene_audio_dir,
+        file_stem=match["file_stem"],
+        clip_index=clip_index,
+    )
+
+    mp4_path = downloads_dir / f"{safe_name(match['file_stem'])}_ltx_scene_{int(clip_index):02d}.mp4"
+
     result = {
         "clip_index": int(clip_index),
         "file_stem": match["file_stem"],
         "scene": match["scene"],
         "seed_image_used": match["seed_image_used"],
-        "audio_path": match["audio_path"],
+        "source_audio_path": match["source_audio_path"],
+        "scene_audio_path": scene_audio_path,
         "prompt_text": match["prompt_text"],
         "resolution": match["resolution"],
         "model": model,
         "guidance_scale": guidance_scale,
-        "status": "submitting",
+        "dry_run": dry_run,
+        "status": "submitting" if not dry_run else "dry_run",
     }
     write_json(output_json, result)
 
+    client = LTXClient(api_key="dry-run-key" if dry_run else None)
     ltx_result = client.audio_to_video(
-        audio_uri=match["audio_path"],
+        audio_uri=scene_audio_path,
         image_uri=match["seed_image_used"],
         prompt=match["prompt_text"],
         output_path=str(mp4_path),
         model=model,
         resolution=match["resolution"],
         guidance_scale=guidance_scale,
+        dry_run=dry_run,
     )
 
     result["ltx_result"] = ltx_result
@@ -233,6 +280,7 @@ def main():
     p1.add_argument("--output", required=True)
     p1.add_argument("--resolution", default="9:16")
     p1.add_argument("--max-scenes", type=int, default=6)
+    p1.add_argument("--scene-seconds", type=float, default=DEFAULT_SCENE_SECONDS)
 
     p2 = sub.add_parser("submit-one")
     p2.add_argument("--plan-json", required=True)
@@ -240,20 +288,22 @@ def main():
     p2.add_argument("--clip-index", type=int, default=1)
     p2.add_argument("--model", default="ltx-2-3-pro")
     p2.add_argument("--guidance-scale", type=float, default=9.0)
+    p2.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args()
 
     if args.command == "plan":
-        plan = build_plan(args.audio, args.seed_dir, args.output, args.resolution, args.max_scenes)
+        plan = build_plan(args.audio, args.seed_dir, args.output, args.resolution, args.max_scenes, args.scene_seconds)
         print("LTX scene plan created.")
         print(Path(args.output).resolve())
         print(f"Scene count: {plan['scene_count']}")
         print(json.dumps(plan["analysis"], indent=2))
     elif args.command == "submit-one":
-        result = submit_one(args.plan_json, args.output, args.clip_index, args.model, args.guidance_scale)
+        result = submit_one(args.plan_json, args.output, args.clip_index, args.model, args.guidance_scale, args.dry_run)
         print("LTX scene submit complete.")
         print(Path(args.output).resolve())
         print(f"Status: {result.get('status')}")
+        print(f"Scene audio: {result.get('scene_audio_path')}")
         print(f"Downloaded MP4: {result.get('downloaded_mp4')}")
 
 
