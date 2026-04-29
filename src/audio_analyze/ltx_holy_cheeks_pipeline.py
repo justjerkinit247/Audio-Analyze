@@ -25,8 +25,13 @@ MAX_LTX_AUDIO_SECONDS = 20.0
 DEFAULT_SCENE_SECONDS = 8.0
 DEFAULT_MODEL = "ltx-2-3-pro"
 DEFAULT_GUIDANCE_SCALE = 9.0
-LTX_AUDIO_FORMAT = "FLAC"
-LTX_AUDIO_EXTENSION = ".flac"
+
+# LTX accepts audio/mpeg and audio/ogg. MP3 is preferred; OGG/Vorbis is fallback
+# because local Windows/Python audio backends do not always expose MP3 encoding.
+LTX_AUDIO_EXPORT_CANDIDATES = [
+    {"format": "MP3", "extension": ".mp3", "subtype": None},
+    {"format": "OGG", "extension": ".ogg", "subtype": "VORBIS"},
+]
 
 
 def write_json(path, data):
@@ -238,6 +243,13 @@ def run_preflight(plan_json, output_json=None):
     return report
 
 
+def export_audio_candidate(path, y, sr, candidate):
+    if candidate["subtype"]:
+        sf.write(str(path), y, sr, format=candidate["format"], subtype=candidate["subtype"])
+    else:
+        sf.write(str(path), y, sr, format=candidate["format"])
+
+
 def export_scene_audio(source_audio_path, scene, output_dir, file_stem, clip_index):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -254,9 +266,25 @@ def export_scene_audio(source_audio_path, scene, output_dir, file_stem, clip_ind
     if y.ndim == 2:
         y = y.T
 
-    scene_audio = output_dir / f"{safe_name(file_stem)}_ltx_scene_{int(clip_index):02d}{LTX_AUDIO_EXTENSION}"
-    sf.write(str(scene_audio), y, sr, format=LTX_AUDIO_FORMAT)
-    return str(scene_audio.resolve())
+    errors = []
+    for candidate in LTX_AUDIO_EXPORT_CANDIDATES:
+        scene_audio = output_dir / f"{safe_name(file_stem)}_ltx_scene_{int(clip_index):02d}{candidate['extension']}"
+        try:
+            export_audio_candidate(scene_audio, y, sr, candidate)
+            return {
+                "path": str(scene_audio.resolve()),
+                "format": candidate["format"],
+                "extension": candidate["extension"],
+            }
+        except Exception as exc:
+            errors.append(f"{candidate['format']} failed: {exc}")
+            try:
+                if scene_audio.exists():
+                    scene_audio.unlink()
+            except Exception:
+                pass
+
+    raise RuntimeError("Could not export LTX-compatible scene audio. " + " | ".join(errors))
 
 
 def _get_plan_item(plan, clip_index):
@@ -286,13 +314,14 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
     downloads_dir.mkdir(parents=True, exist_ok=True)
     scene_audio_dir.mkdir(parents=True, exist_ok=True)
 
-    scene_audio_path = export_scene_audio(
+    scene_audio = export_scene_audio(
         source_audio_path=match["source_audio_path"],
         scene=match["scene"],
         output_dir=scene_audio_dir,
         file_stem=match["file_stem"],
         clip_index=clip_index,
     )
+    scene_audio_path = scene_audio["path"]
 
     mp4_path = downloads_dir / f"{safe_name(match['file_stem'])}_ltx_scene_{int(clip_index):02d}.mp4"
     result = {
@@ -302,7 +331,7 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
         "seed_image_used": match["seed_image_used"],
         "source_audio_path": match["source_audio_path"],
         "scene_audio_path": scene_audio_path,
-        "scene_audio_format": LTX_AUDIO_FORMAT,
+        "scene_audio_format": scene_audio["format"],
         "prompt_text": match["prompt_text"],
         "resolution": match["resolution"],
         "model": model,
@@ -362,6 +391,7 @@ def submit_all(plan_json, output_dir, model=DEFAULT_MODEL, guidance_scale=DEFAUL
             "clip_index": idx,
             "status": result.get("status"),
             "scene_audio_path": result.get("scene_audio_path"),
+            "scene_audio_format": result.get("scene_audio_format"),
             "downloaded_mp4": result.get("downloaded_mp4"),
             "result_json": str(result_path.resolve()),
         })
@@ -433,6 +463,7 @@ def main():
         print(Path(args.output).resolve())
         print(f"Status: {result.get('status')}")
         print(f"Scene audio: {result.get('scene_audio_path')}")
+        print(f"Scene audio format: {result.get('scene_audio_format')}")
         print(f"Downloaded MP4: {result.get('downloaded_mp4')}")
     elif args.command == "submit-all":
         summary = submit_all(
