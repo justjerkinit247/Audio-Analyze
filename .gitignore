@@ -5,6 +5,13 @@ venv/
 .pytest_cache/
 .DS_Store
 
+# Local environment and secrets
+.env
+.env.*
+*.key
+*key*.txt
+*secret*.txt
+
 # Local generated outputs
 outputs/
 
@@ -14,6 +21,7 @@ archive/runway_generations/local_exports/
 # Local audio/video inputs
 inputs/audio/
 inputs/runway_seed_images/
+inputs/ltx_seed_images/
 inputs/driving_performance/
 inputs/character_images/
 inputs/lip_sync_audio/
