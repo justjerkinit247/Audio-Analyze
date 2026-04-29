@@ -1,6 +1,7 @@
 from pathlib import Path
 import argparse
 import json
+import os
 import re
 
 import librosa
@@ -22,12 +23,18 @@ RESOLUTION_MAP = {
 MIN_LTX_AUDIO_SECONDS = 2.0
 MAX_LTX_AUDIO_SECONDS = 20.0
 DEFAULT_SCENE_SECONDS = 8.0
+DEFAULT_MODEL = "ltx-2-3-pro"
+DEFAULT_GUIDANCE_SCALE = 9.0
 
 
 def write_json(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
 def scalarize(value):
@@ -188,6 +195,47 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
     return plan
 
 
+def validate_plan(plan):
+    problems = []
+    if not plan.get("results"):
+        problems.append("Plan has no scene results.")
+    for item in plan.get("results", []):
+        idx = item.get("clip_index", "unknown")
+        audio_path = Path(item.get("source_audio_path", ""))
+        image_path = Path(item.get("seed_image_used", ""))
+        scene = item.get("scene", {})
+        duration = float(scene.get("duration", 0))
+        prompt = item.get("prompt_text", "")
+        resolution = item.get("resolution", "")
+        if not audio_path.exists():
+            problems.append(f"Scene {idx}: source audio missing: {audio_path}")
+        if not image_path.exists():
+            problems.append(f"Scene {idx}: seed image missing: {image_path}")
+        if duration < MIN_LTX_AUDIO_SECONDS or duration > MAX_LTX_AUDIO_SECONDS:
+            problems.append(f"Scene {idx}: audio duration {duration:.2f}s is outside {MIN_LTX_AUDIO_SECONDS}-{MAX_LTX_AUDIO_SECONDS}s.")
+        if not prompt.strip():
+            problems.append(f"Scene {idx}: prompt is empty.")
+        if len(prompt) > 5000:
+            problems.append(f"Scene {idx}: prompt is over 5000 characters.")
+        if resolution not in set(RESOLUTION_MAP.values()):
+            problems.append(f"Scene {idx}: resolution looks unsupported or unnormalized: {resolution}")
+    return problems
+
+
+def run_preflight(plan_json, output_json=None):
+    plan = read_json(plan_json)
+    problems = validate_plan(plan)
+    report = {
+        "status": "FAILED" if problems else "PASSED",
+        "scene_count": len(plan.get("results", [])),
+        "problems": problems,
+        "plan_json": str(Path(plan_json).resolve()),
+    }
+    if output_json:
+        write_json(output_json, report)
+    return report
+
+
 def export_scene_audio(source_audio_path, scene, output_dir, file_stem, clip_index):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -209,16 +257,27 @@ def export_scene_audio(source_audio_path, scene, output_dir, file_stem, clip_ind
     return str(scene_audio.resolve())
 
 
-def submit_one(plan_json, output_json, clip_index, model="ltx-2-3-pro", guidance_scale=9.0, dry_run=False):
-    plan = json.loads(Path(plan_json).read_text(encoding="utf-8-sig"))
-    match = None
+def _get_plan_item(plan, clip_index):
     for item in plan["results"]:
         if int(item["clip_index"]) == int(clip_index):
-            match = item
-            break
-    if match is None:
-        raise ValueError(f"Clip index {clip_index} not found")
+            return item
+    raise ValueError(f"Clip index {clip_index} not found")
 
+
+def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE, dry_run=True, live=False):
+    if live and dry_run:
+        raise ValueError("Use either dry_run or live, not both.")
+    if not dry_run and not live:
+        raise RuntimeError("Live LTX calls require live=True. Default is dry-run to prevent accidental credit spending.")
+    if live and not os.environ.get("LTXV_API_KEY"):
+        raise RuntimeError("LTXV_API_KEY is not set. Refusing live LTX call.")
+
+    plan = read_json(plan_json)
+    problems = validate_plan(plan)
+    if problems:
+        raise RuntimeError("Preflight failed; refusing submit. Problems:\n" + "\n".join(problems))
+
+    match = _get_plan_item(plan, clip_index)
     output_root = Path(output_json).parent
     downloads_dir = output_root / "downloads"
     scene_audio_dir = output_root / "scene_audio"
@@ -234,7 +293,6 @@ def submit_one(plan_json, output_json, clip_index, model="ltx-2-3-pro", guidance
     )
 
     mp4_path = downloads_dir / f"{safe_name(match['file_stem'])}_ltx_scene_{int(clip_index):02d}.mp4"
-
     result = {
         "clip_index": int(clip_index),
         "file_stem": match["file_stem"],
@@ -247,7 +305,8 @@ def submit_one(plan_json, output_json, clip_index, model="ltx-2-3-pro", guidance
         "model": model,
         "guidance_scale": guidance_scale,
         "dry_run": dry_run,
-        "status": "submitting" if not dry_run else "dry_run",
+        "live": live,
+        "status": "submitting" if live else "dry_run",
     }
     write_json(output_json, result)
 
@@ -270,6 +329,46 @@ def submit_one(plan_json, output_json, clip_index, model="ltx-2-3-pro", guidance
     return result
 
 
+def submit_all(plan_json, output_dir, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE, dry_run=True, live=False):
+    plan = read_json(plan_json)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "status": "running",
+        "dry_run": dry_run,
+        "live": live,
+        "plan_json": str(Path(plan_json).resolve()),
+        "results": [],
+    }
+    summary_path = output_dir / "ltx_submit_all_summary.json"
+    write_json(summary_path, summary)
+
+    for item in plan.get("results", []):
+        idx = int(item["clip_index"])
+        result_path = output_dir / f"scene_{idx:02d}_result.json"
+        result = submit_one(
+            plan_json=plan_json,
+            output_json=result_path,
+            clip_index=idx,
+            model=model,
+            guidance_scale=guidance_scale,
+            dry_run=dry_run,
+            live=live,
+        )
+        summary["results"].append({
+            "clip_index": idx,
+            "status": result.get("status"),
+            "scene_audio_path": result.get("scene_audio_path"),
+            "downloaded_mp4": result.get("downloaded_mp4"),
+            "result_json": str(result_path.resolve()),
+        })
+        write_json(summary_path, summary)
+
+    summary["status"] = "complete"
+    write_json(summary_path, summary)
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser(description="LTX Studio Holy Cheeks video pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -282,13 +381,24 @@ def main():
     p1.add_argument("--max-scenes", type=int, default=6)
     p1.add_argument("--scene-seconds", type=float, default=DEFAULT_SCENE_SECONDS)
 
+    p_pre = sub.add_parser("preflight")
+    p_pre.add_argument("--plan-json", required=True)
+    p_pre.add_argument("--output", default=None)
+
     p2 = sub.add_parser("submit-one")
     p2.add_argument("--plan-json", required=True)
     p2.add_argument("--output", required=True)
     p2.add_argument("--clip-index", type=int, default=1)
-    p2.add_argument("--model", default="ltx-2-3-pro")
-    p2.add_argument("--guidance-scale", type=float, default=9.0)
-    p2.add_argument("--dry-run", action="store_true")
+    p2.add_argument("--model", default=DEFAULT_MODEL)
+    p2.add_argument("--guidance-scale", type=float, default=DEFAULT_GUIDANCE_SCALE)
+    p2.add_argument("--live", action="store_true", help="Actually call LTX and spend credits. Omit for dry-run.")
+
+    p_all = sub.add_parser("submit-all")
+    p_all.add_argument("--plan-json", required=True)
+    p_all.add_argument("--output-dir", required=True)
+    p_all.add_argument("--model", default=DEFAULT_MODEL)
+    p_all.add_argument("--guidance-scale", type=float, default=DEFAULT_GUIDANCE_SCALE)
+    p_all.add_argument("--live", action="store_true", help="Actually call LTX for all scenes and spend credits. Omit for dry-run.")
 
     args = parser.parse_args()
 
@@ -298,13 +408,42 @@ def main():
         print(Path(args.output).resolve())
         print(f"Scene count: {plan['scene_count']}")
         print(json.dumps(plan["analysis"], indent=2))
+    elif args.command == "preflight":
+        report = run_preflight(args.plan_json, args.output)
+        print(f"Preflight status: {report['status']}")
+        print(f"Scene count: {report['scene_count']}")
+        for problem in report["problems"]:
+            print(f"PROBLEM: {problem}")
+        if args.output:
+            print(Path(args.output).resolve())
     elif args.command == "submit-one":
-        result = submit_one(args.plan_json, args.output, args.clip_index, args.model, args.guidance_scale, args.dry_run)
+        result = submit_one(
+            args.plan_json,
+            args.output,
+            args.clip_index,
+            args.model,
+            args.guidance_scale,
+            dry_run=not args.live,
+            live=args.live,
+        )
         print("LTX scene submit complete.")
         print(Path(args.output).resolve())
         print(f"Status: {result.get('status')}")
         print(f"Scene audio: {result.get('scene_audio_path')}")
         print(f"Downloaded MP4: {result.get('downloaded_mp4')}")
+    elif args.command == "submit-all":
+        summary = submit_all(
+            args.plan_json,
+            args.output_dir,
+            args.model,
+            args.guidance_scale,
+            dry_run=not args.live,
+            live=args.live,
+        )
+        print("LTX submit-all complete.")
+        print(f"Status: {summary['status']}")
+        print(f"Scenes: {len(summary['results'])}")
+        print(Path(args.output_dir).resolve())
 
 
 if __name__ == "__main__":
