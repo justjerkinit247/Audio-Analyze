@@ -3,13 +3,14 @@ import argparse
 import json
 import re
 
-from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
+from moviepy import VideoFileClip, AudioFileClip, ImageClip, concatenate_videoclips
 
 
 SCENE_NUMBER_RE = re.compile(r"(?:scene[_-]?)(\d+)", re.IGNORECASE)
 DEFAULT_TRIM_TAIL_SECONDS = 0.08
 DEFAULT_TRANSITION_SECONDS = 0.0
 DEFAULT_AUDIO_OFFSET_SECONDS = 0.0
+DEFAULT_MIN_PAD_SECONDS = 0.01
 
 
 def scene_number_from_path(path):
@@ -32,6 +33,10 @@ def natural_scene_key(path):
     if scene_number is not None:
         return scene_number, safe_mtime(path), path.name.lower()
     return 9999, safe_mtime(path), path.name.lower()
+
+
+def read_json(path):
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
 def collect_mp4s(downloads_dir):
@@ -99,11 +104,17 @@ def select_latest_scene_clips(clip_paths, expected_scenes=None, strict_scenes=Fa
     }
 
 
-def load_source_audio(plan_json):
+def load_plan(plan_json):
     if not plan_json:
         return None
-    data = json.loads(Path(plan_json).read_text(encoding="utf-8-sig"))
-    results = data.get("results") or []
+    return read_json(plan_json)
+
+
+def load_source_audio(plan_json):
+    plan = load_plan(plan_json)
+    if not plan:
+        return None
+    results = plan.get("results") or []
     if not results:
         return None
     audio_path = results[0].get("source_audio_path")
@@ -111,13 +122,29 @@ def load_source_audio(plan_json):
 
 
 def load_expected_scene_count(plan_json):
-    if not plan_json:
+    plan = load_plan(plan_json)
+    if not plan:
         return None
-    data = json.loads(Path(plan_json).read_text(encoding="utf-8-sig"))
-    if data.get("scene_count"):
-        return int(data["scene_count"])
-    results = data.get("results") or []
+    if plan.get("scene_count"):
+        return int(plan["scene_count"])
+    results = plan.get("results") or []
     return len(results) or None
+
+
+def load_scene_durations(plan_json):
+    plan = load_plan(plan_json)
+    if not plan:
+        return {}
+    durations = {}
+    for item in plan.get("results", []):
+        clip_index = item.get("clip_index")
+        scene = item.get("scene", {})
+        if clip_index is None:
+            continue
+        duration = scene.get("duration")
+        if duration is not None:
+            durations[int(clip_index)] = float(duration)
+    return durations
 
 
 def trim_clip_tail(clip, trim_tail_seconds):
@@ -127,6 +154,34 @@ def trim_clip_tail(clip, trim_tail_seconds):
     if clip.duration <= trim_tail_seconds + 0.25:
         return clip
     return clip.subclipped(0, clip.duration - trim_tail_seconds)
+
+
+def pad_clip_to_duration(clip, target_duration, fps=24, min_pad_seconds=DEFAULT_MIN_PAD_SECONDS):
+    target_duration = float(target_duration)
+    if target_duration <= 0:
+        return clip, 0.0
+    current_duration = float(clip.duration)
+    delta = target_duration - current_duration
+    if abs(delta) < min_pad_seconds:
+        return clip, 0.0
+    if delta < 0:
+        return clip.subclipped(0, target_duration), delta
+
+    frame_time = max(0.0, current_duration - (1.0 / max(float(fps), 1.0)))
+    last_frame = clip.get_frame(frame_time)
+    hold = ImageClip(last_frame).with_duration(delta).with_fps(fps)
+    padded = concatenate_videoclips([clip, hold], method="compose")
+    return padded, delta
+
+
+def normalize_clip_to_plan_duration(clip, scene_number, scene_durations, preserve_plan_timing, fps=24):
+    if not preserve_plan_timing:
+        return clip, None, 0.0
+    target_duration = scene_durations.get(scene_number)
+    if target_duration is None:
+        return clip, None, 0.0
+    normalized, pad_delta = pad_clip_to_duration(clip, target_duration, fps=fps)
+    return normalized, target_duration, pad_delta
 
 
 def add_crossfades(clips, transition_seconds):
@@ -185,10 +240,11 @@ def apply_audio_offset(audio_full, final_duration, start_seconds, audio_offset_s
     return audio_full.subclipped(source_start, source_start + final_duration)
 
 
-def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, start_seconds=0.0, duration_seconds=None, fps=24, trim_tail_seconds=DEFAULT_TRIM_TAIL_SECONDS, transition_seconds=DEFAULT_TRANSITION_SECONDS, audio_offset_seconds=DEFAULT_AUDIO_OFFSET_SECONDS, expected_scenes=None, strict_scenes=False, report_json=None):
+def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, start_seconds=0.0, duration_seconds=None, fps=24, trim_tail_seconds=DEFAULT_TRIM_TAIL_SECONDS, transition_seconds=DEFAULT_TRANSITION_SECONDS, audio_offset_seconds=DEFAULT_AUDIO_OFFSET_SECONDS, expected_scenes=None, strict_scenes=False, report_json=None, preserve_plan_timing=True):
     all_clip_paths = collect_mp4s(downloads_dir)
     if expected_scenes is None:
         expected_scenes = load_expected_scene_count(plan_json)
+    scene_durations = load_scene_durations(plan_json) if preserve_plan_timing else {}
     selection = select_latest_scene_clips(all_clip_paths, expected_scenes=expected_scenes, strict_scenes=strict_scenes)
     clip_paths = selection["selected"]
     if not clip_paths:
@@ -198,17 +254,31 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     raw_clips = [VideoFileClip(str(path)) for path in clip_paths]
-    raw_clip_info = [
-        {
-            "scene": scene_number_from_path(path),
+    processed_clips = []
+    raw_clip_info = []
+
+    for path, clip in zip(clip_paths, raw_clips):
+        scene_number = scene_number_from_path(path)
+        trimmed = trim_clip_tail(clip, trim_tail_seconds)
+        normalized, target_duration, pad_delta = normalize_clip_to_plan_duration(
+            trimmed,
+            scene_number,
+            scene_durations,
+            preserve_plan_timing=preserve_plan_timing,
+            fps=fps,
+        )
+        processed_clips.append(normalized)
+        raw_clip_info.append({
+            "scene": scene_number,
             "path": str(path.resolve()),
             "raw_duration": round(float(clip.duration), 3),
-            "trimmed_duration": round(float(trim_clip_tail(clip, trim_tail_seconds).duration), 3),
-        }
-        for path, clip in zip(clip_paths, raw_clips)
-    ]
-    video_clips = [trim_clip_tail(clip, trim_tail_seconds) for clip in raw_clips]
-    video_clips, padding = add_crossfades(video_clips, transition_seconds)
+            "trimmed_duration": round(float(trimmed.duration), 3),
+            "target_plan_duration": round(float(target_duration), 3) if target_duration is not None else None,
+            "duration_adjustment": round(float(pad_delta), 3),
+            "final_scene_duration": round(float(normalized.duration), 3),
+        })
+
+    video_clips, padding = add_crossfades(processed_clips, transition_seconds)
     final_video = concatenate_videoclips(video_clips, method="compose", padding=padding)
 
     audio_source = Path(audio_path) if audio_path else load_source_audio(plan_json)
@@ -249,6 +319,7 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
         "audio_offset_seconds": audio_offset_seconds,
         "duration_seconds": duration_seconds,
         "trim_tail_seconds": trim_tail_seconds,
+        "preserve_plan_timing": preserve_plan_timing,
         "transition_seconds": transition_seconds,
         "transition_padding": padding,
         "final_video_duration": round(float(final_video.duration), 3) if final_video else None,
@@ -261,6 +332,12 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
 
     for clip in raw_clips:
         clip.close()
+    for clip in processed_clips:
+        if clip not in raw_clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
     if audio_clip:
         audio_clip.close()
     if audio_full:
@@ -285,6 +362,8 @@ def main():
     parser.add_argument("--expected-scenes", type=int, default=None, help="Expected number of scene clips. Defaults to scene_count from the plan JSON.")
     parser.add_argument("--strict-scenes", action="store_true", help="Fail if any expected scene clip is missing.")
     parser.add_argument("--report-json", default="outputs\\ltx_video_run\\assembled\\assembly_report.json")
+    parser.add_argument("--preserve-plan-timing", action="store_true", default=True, help="Trim damaged tails, then pad/clip each scene back to its planned duration from the plan JSON. Enabled by default.")
+    parser.add_argument("--no-preserve-plan-timing", action="store_false", dest="preserve_plan_timing", help="Disable plan-duration preservation and assemble using actual processed clip durations.")
     args = parser.parse_args()
 
     info = merge_clips(
@@ -301,6 +380,7 @@ def main():
         expected_scenes=args.expected_scenes,
         strict_scenes=args.strict_scenes,
         report_json=args.report_json,
+        preserve_plan_timing=args.preserve_plan_timing,
     )
 
     print("LTX clip assembly complete.")
