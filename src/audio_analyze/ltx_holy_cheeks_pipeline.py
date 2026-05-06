@@ -25,6 +25,9 @@ MAX_LTX_AUDIO_SECONDS = 20.0
 DEFAULT_SCENE_SECONDS = 8.0
 DEFAULT_MODEL = "ltx-2-3-pro"
 DEFAULT_GUIDANCE_SCALE = 9.0
+DEFAULT_AUDIO = "inputs\\audio\\hop out the whip.mp3"
+DEFAULT_PLAN_JSON = "outputs\\ltx_video_run\\holy_cheeks_ltx_plan.json"
+DEFAULT_SEED_DIR = "inputs\\ltx_seed_images"
 
 # LTX accepts audio/mpeg and audio/ogg. MP3 is preferred; OGG/Vorbis is fallback
 # because local Windows/Python audio backends do not always expose MP3 encoding.
@@ -407,9 +410,9 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p1 = sub.add_parser("plan")
-    p1.add_argument("--audio", required=True)
-    p1.add_argument("--seed-dir", default="inputs\\ltx_seed_images")
-    p1.add_argument("--output", required=True)
+    p1.add_argument("--audio", default=DEFAULT_AUDIO)
+    p1.add_argument("--seed-dir", default=DEFAULT_SEED_DIR)
+    p1.add_argument("--output", default=DEFAULT_PLAN_JSON)
     p1.add_argument("--resolution", default="9:16")
     p1.add_argument("--max-scenes", type=int, default=6)
     p1.add_argument("--scene-seconds", type=float, default=DEFAULT_SCENE_SECONDS)
