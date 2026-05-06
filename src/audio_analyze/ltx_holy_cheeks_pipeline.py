@@ -126,19 +126,48 @@ def analyze_audio(audio_path):
     }
 
 
-def build_scenes(duration_seconds, max_scenes=6, scene_seconds=DEFAULT_SCENE_SECONDS):
+def resolve_scene_count(duration_seconds, requested_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS):
+    """Resolve requested scene count while keeping each LTX audio slice legal."""
+    duration_seconds = float(duration_seconds)
+    scene_seconds = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, float(scene_seconds)))
+
+    if requested_scenes is None:
+        requested_scenes = max(1, int(np.ceil(duration_seconds / scene_seconds)))
+
+    requested_scenes = max(1, int(requested_scenes))
+    max_possible_by_min_duration = max(1, int(duration_seconds // MIN_LTX_AUDIO_SECONDS))
+    return min(requested_scenes, max_possible_by_min_duration)
+
+
+def build_scenes(duration_seconds, max_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS):
     scene_seconds = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, float(scene_seconds)))
     duration_seconds = float(duration_seconds)
-    scene_count = max(1, min(max_scenes, int(np.ceil(duration_seconds / scene_seconds))))
+    scene_count = resolve_scene_count(duration_seconds, requested_scenes=max_scenes, scene_seconds=scene_seconds)
     scenes = []
 
     for i in range(scene_count):
         start = i * scene_seconds
         end = min(duration_seconds, start + scene_seconds)
-        if end - start < MIN_LTX_AUDIO_SECONDS and scenes:
-            scenes[-1]["end"] = round(duration_seconds, 3)
-            scenes[-1]["duration"] = round(duration_seconds - scenes[-1]["start"], 3)
-            break
+
+        if end - start < MIN_LTX_AUDIO_SECONDS:
+            # If fixed 8-second stepping runs out of audio, distribute remaining audio
+            # across the requested seed-image count instead of silently dropping scenes.
+            equal_scene_seconds = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, duration_seconds / scene_count))
+            scenes = []
+            for j in range(scene_count):
+                equal_start = j * equal_scene_seconds
+                equal_end = min(duration_seconds, equal_start + equal_scene_seconds)
+                if equal_end - equal_start < MIN_LTX_AUDIO_SECONDS:
+                    break
+                scenes.append({
+                    "scene_index": len(scenes) + 1,
+                    "start": round(equal_start, 3),
+                    "end": round(equal_end, 3),
+                    "duration": round(equal_end - equal_start, 3),
+                    "scene_type": "intro hook" if j == 0 else "closing phrase" if j == scene_count - 1 else "performance phrase",
+                })
+            return scenes
+
         scenes.append({
             "scene_index": len(scenes) + 1,
             "start": round(start, 3),
@@ -169,18 +198,19 @@ def build_prompt(file_stem, analysis, scene):
     )
 
 
-def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=6, scene_seconds=DEFAULT_SCENE_SECONDS):
+def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS):
     audio_path = Path(audio_path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path.resolve()}")
     images = list_seed_images(seed_dir)
     analysis = analyze_audio(audio_path)
-    scenes = build_scenes(analysis["duration_seconds"], max_scenes=max_scenes, scene_seconds=scene_seconds)
+    auto_scene_count = len(images) if max_scenes is None else int(max_scenes)
+    scenes = build_scenes(analysis["duration_seconds"], max_scenes=auto_scene_count, scene_seconds=scene_seconds)
     resolution = normalize_resolution(resolution)
 
     results = []
     for idx, scene in enumerate(scenes, start=1):
-        image = images[(idx - 1) % len(images)]
+        image = images[idx - 1]
         results.append({
             "clip_index": idx,
             "file_stem": audio_path.stem,
@@ -196,6 +226,8 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
         "file_stem": audio_path.stem,
         "analysis": analysis,
         "scene_count": len(results),
+        "seed_image_count": len(images),
+        "scene_count_source": "seed_image_count" if max_scenes is None else "manual_max_scenes",
         "resolution": resolution,
         "scene_seconds": scene_seconds,
         "results": results,
@@ -414,7 +446,7 @@ def main():
     p1.add_argument("--seed-dir", default=DEFAULT_SEED_DIR)
     p1.add_argument("--output", default=DEFAULT_PLAN_JSON)
     p1.add_argument("--resolution", default="9:16")
-    p1.add_argument("--max-scenes", type=int, default=6)
+    p1.add_argument("--max-scenes", type=int, default=None, help="Manual scene cap. Omit to auto-use one scene per usable seed image.")
     p1.add_argument("--scene-seconds", type=float, default=DEFAULT_SCENE_SECONDS)
 
     p_pre = sub.add_parser("preflight")
@@ -442,7 +474,9 @@ def main():
         plan = build_plan(args.audio, args.seed_dir, args.output, args.resolution, args.max_scenes, args.scene_seconds)
         print("LTX scene plan created.")
         print(Path(args.output).resolve())
+        print(f"Seed images found: {plan.get('seed_image_count')}")
         print(f"Scene count: {plan['scene_count']}")
+        print(f"Scene count source: {plan.get('scene_count_source')}")
         print(json.dumps(plan["analysis"], indent=2))
     elif args.command == "preflight":
         report = run_preflight(args.plan_json, args.output)
