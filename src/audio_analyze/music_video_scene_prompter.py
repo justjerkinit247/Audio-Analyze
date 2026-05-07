@@ -81,8 +81,11 @@ def hint_from_filename(path):
 
 def load_scene_manifest(manifest_path):
     if not manifest_path:
-        return {}
-    raw = read_json(manifest_path)
+        return {}, None
+    path = Path(manifest_path)
+    if not path.exists():
+        return {}, f"Scene manifest not found; continuing without manifest: {path.resolve()}"
+    raw = read_json(path)
     raw_scenes = raw.get("scenes", []) if isinstance(raw, dict) else raw if isinstance(raw, list) else []
     manifest = {}
     for entry in raw_scenes:
@@ -105,7 +108,7 @@ def load_scene_manifest(manifest_path):
             "negative_prompt": first_text(entry, "negative_prompt", "avoid"),
             "notes": first_text(entry, "notes"),
         }
-    return manifest
+    return manifest, None
 
 
 def collect_seed_images(seed_dir):
@@ -365,9 +368,11 @@ def make_preview(plan, output_path):
 
 def apply_scene_prompts(plan_json, seed_dir, output_json=None, manifest_json=None, strict=False, preview_md=None):
     plan = read_json(plan_json)
-    manifest = load_scene_manifest(manifest_json)
+    manifest, manifest_problem = load_scene_manifest(manifest_json)
     labeled, unlabeled = collect_seed_images(seed_dir)
     problems = []
+    if manifest_problem:
+        problems.append(manifest_problem)
     assignments = []
     for item in plan.get("results", []):
         clip_index = int(item.get("clip_index"))
