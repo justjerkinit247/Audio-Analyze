@@ -10,8 +10,10 @@ import soundfile as sf
 
 try:
     from .ltx_client import LTXClient
+    from .music_video_scene_prompter import apply_scene_prompts
 except ImportError:
     from ltx_client import LTXClient
+    from music_video_scene_prompter import apply_scene_prompts
 
 
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp"}
@@ -153,16 +155,12 @@ def build_prompt(file_stem, analysis, scene):
         f"Vertical short-form music video for {file_stem}. "
         f"Scene {scene['scene_index']} covers {scene['start']:.2f}s to {scene['end']:.2f}s. "
         f"Motion must feel locked to {bpm_text}. "
-        f"Three gospel-performance characters continue walking forward in synchronized rhythm. "
-        f"The camera tracks backward smoothly and slightly arcs to the side. "
-        f"Performers glance back over their shoulders with confident playful stage presence. "
-        f"Two female performers add brief rhythmic hip and lower-body dance accents synced to the beat, "
-        f"styled as polished gospel-club choreography and not explicit. "
+        f"Use this as a placeholder base only; the fresh scene prompter should replace this with "
+        f"scene-specific seed-image guidance, scene description, and music-sync cues before live submission. "
         f"Movement direction: {analysis['movement_notes']}. "
         f"Camera direction: {analysis['camera_notes']}. "
         f"Lighting direction: {analysis['lighting_notes']}. "
-        f"White robe-inspired wardrobe, sacred-meets-club energy, clean facial consistency, no extra limbs, "
-        f"no random costume changes, no chaotic warping, no random scene change."
+        f"Clean facial consistency, no extra limbs, no random costume changes, no chaotic warping, no random scene change."
     )
 
 
@@ -191,6 +189,7 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
 
     plan = {
         "file_stem": audio_path.stem,
+        "source_audio_path": str(audio_path.resolve()),
         "analysis": analysis,
         "scene_count": len(results),
         "resolution": resolution,
@@ -235,6 +234,9 @@ def run_preflight(plan_json, output_json=None):
     report = {
         "status": "FAILED" if problems else "PASSED",
         "scene_count": len(plan.get("results", [])),
+        "fresh_scene_prompts": bool(plan.get("scene_prompting", {}).get("fresh_scene_prompts")),
+        "main_audio_analyzed_per_scene": bool(plan.get("scene_prompting", {}).get("main_audio_analyzed_per_scene")),
+        "seed_images_inspected": bool(plan.get("scene_prompting", {}).get("seed_images_inspected")),
         "problems": problems,
         "plan_json": str(Path(plan_json).resolve()),
     }
@@ -333,6 +335,7 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
         "scene_audio_path": scene_audio_path,
         "scene_audio_format": scene_audio["format"],
         "prompt_text": match["prompt_text"],
+        "scene_prompt_context": match.get("scene_prompt_context"),
         "resolution": match["resolution"],
         "model": model,
         "guidance_scale": guidance_scale,
@@ -413,6 +416,9 @@ def main():
     p1.add_argument("--resolution", default="9:16")
     p1.add_argument("--max-scenes", type=int, default=6)
     p1.add_argument("--scene-seconds", type=float, default=DEFAULT_SCENE_SECONDS)
+    p1.add_argument("--manifest-json", default=None, help="Optional per-scene description/sync manifest used to generate fresh scene prompts.")
+    p1.add_argument("--scene-prompt-preview", default="outputs\\ltx_video_run\\fresh_scene_prompt_preview.md")
+    p1.add_argument("--skip-scene-prompts", action="store_true", help="Only build the base plan; do not generate fresh scene-specific prompts.")
 
     p_pre = sub.add_parser("preflight")
     p_pre.add_argument("--plan-json", required=True)
@@ -437,14 +443,32 @@ def main():
 
     if args.command == "plan":
         plan = build_plan(args.audio, args.seed_dir, args.output, args.resolution, args.max_scenes, args.scene_seconds)
-        print("LTX scene plan created.")
+        print("Music video scene plan created.")
         print(Path(args.output).resolve())
         print(f"Scene count: {plan['scene_count']}")
         print(json.dumps(plan["analysis"], indent=2))
+        if not args.skip_scene_prompts:
+            plan = apply_scene_prompts(
+                plan_json=args.output,
+                seed_dir=args.seed_dir,
+                output_json=args.output,
+                manifest_json=args.manifest_json,
+                strict=False,
+                preview_md=args.scene_prompt_preview,
+            )
+            prompting = plan.get("scene_prompting", {})
+            print("Fresh scene prompts applied.")
+            print(f"Assignments: {len(prompting.get('assignments', []))}")
+            print(f"Preview: {Path(args.scene_prompt_preview).resolve()}")
+            for problem in prompting.get("problems", []):
+                print(f"NOTE: {problem}")
     elif args.command == "preflight":
         report = run_preflight(args.plan_json, args.output)
         print(f"Preflight status: {report['status']}")
         print(f"Scene count: {report['scene_count']}")
+        print(f"Fresh scene prompts: {report['fresh_scene_prompts']}")
+        print(f"Main audio analyzed per scene: {report['main_audio_analyzed_per_scene']}")
+        print(f"Seed images inspected: {report['seed_images_inspected']}")
         for problem in report["problems"]:
             print(f"PROBLEM: {problem}")
         if args.output:
