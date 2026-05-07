@@ -403,7 +403,7 @@ def submit_all(plan_json, output_dir, model=DEFAULT_MODEL, guidance_scale=DEFAUL
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LTX Studio Holy Cheeks video pipeline")
+    parser = argparse.ArgumentParser(description="LTX Studio Music Video Pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p1 = sub.add_parser("plan")
