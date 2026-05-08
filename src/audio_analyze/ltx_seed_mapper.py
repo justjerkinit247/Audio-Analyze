@@ -18,7 +18,7 @@ LABEL_CLEAN_PATTERNS = [
     re.compile(r"(?:^|[_\-\s])s\d{1,2}(?:[_\-\s]|$)", re.IGNORECASE),
 ]
 STOP_TOKENS = {
-    "seed", "image", "img", "ltx", "holy", "cheeks", "gospel", "twerk",
+    "seed", "image", "img", "ltx", "holy", "cheeks", "gospel",
     "png", "jpg", "jpeg", "webp", "final", "v1", "v2", "new"
 }
 
