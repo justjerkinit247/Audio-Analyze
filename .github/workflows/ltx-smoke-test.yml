@@ -1,0 +1,45 @@
+name: LTX Orchestrator Smoke Test
+
+on:
+  push:
+    branches:
+      - main
+      - ltx-orchestrator-v1
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lightweight dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy librosa soundfile
+
+      - name: Compile Python modules
+        run: |
+          python -m py_compile src/audio_analyze/ltx_orchestrator.py
+          python -m py_compile src/audio_analyze/ltx_ffmpeg_assembler.py
+          python -m py_compile src/audio_analyze/music_video_pipeline.py
+
+      - name: Import orchestration modules
+        run: |
+          python - <<'PY'
+          from src.audio_analyze import ltx_orchestrator
+          from src.audio_analyze import ltx_ffmpeg_assembler
+          from src.audio_analyze import music_video_pipeline
+          print("LTX orchestrator imports OK")
+          print("FFmpeg assembler imports OK")
+          print("Music video pipeline imports OK")
+          PY
