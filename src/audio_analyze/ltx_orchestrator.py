@@ -3,6 +3,9 @@ import argparse
 import json
 from datetime import datetime
 
+import librosa
+import numpy as np
+
 try:
     from .ltx_holy_cheeks_pipeline import (
         build_plan,
@@ -51,6 +54,67 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def scalar(value):
+    arr = np.asarray(value)
+    if arr.size == 0:
+        return 0.0
+    return float(arr.reshape(-1)[0])
+
+
+def extract_beat_markers(audio_path, plan):
+    audio_path = Path(audio_path)
+    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    duration = float(librosa.get_duration(y=y, sr=sr))
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    tempo_raw, beat_frames = librosa.beat.beat_track(y=y, sr=sr, onset_envelope=onset_env)
+    tempo = scalar(tempo_raw)
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+    onset_times = librosa.times_like(onset_env, sr=sr)
+
+    top_onsets = []
+    if len(onset_env):
+        count = min(64, len(onset_env))
+        top_indices = np.argsort(onset_env)[-count:]
+        top_onsets = sorted(
+            {
+                round(float(onset_times[i]), 3)
+                for i in top_indices
+                if 0 <= float(onset_times[i]) <= duration
+            }
+        )
+
+    scene_markers = []
+    for item in plan.get("results", []):
+        idx = int(item.get("clip_index", 0))
+        scene = item.get("scene", {})
+        start = float(scene.get("start", 0.0))
+        end = float(scene.get("end", start))
+        beats_in_scene = [round(float(t), 3) for t in beat_times if start <= float(t) <= end]
+        onsets_in_scene = [round(float(t), 3) for t in top_onsets if start <= float(t) <= end]
+        scene_markers.append({
+            "clip_index": idx,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "duration": round(max(0.0, end - start), 3),
+            "beat_times_seconds": beats_in_scene,
+            "strong_onset_times_seconds": onsets_in_scene,
+            "primary_sync_targets_seconds": onsets_in_scene[:8] if onsets_in_scene else beats_in_scene[:8],
+            "sync_density": len(onsets_in_scene) if onsets_in_scene else len(beats_in_scene),
+        })
+
+    return {
+        "status": "analyzed",
+        "audio_path": str(audio_path.resolve()),
+        "duration_seconds": round(duration, 3),
+        "tempo_bpm": round(tempo, 3) if tempo else None,
+        "beat_count": len(beat_times),
+        "strong_onset_count": len(top_onsets),
+        "beat_times_seconds": [round(float(t), 3) for t in beat_times],
+        "strong_onset_times_seconds": top_onsets,
+        "scenes": scene_markers,
+    }
+
+
 def build_continuity_memory(plan):
     scenes = plan.get("results", [])
     memory = {
@@ -80,15 +144,21 @@ def build_continuity_memory(plan):
     return memory
 
 
-def build_beat_camera_choreography_manifest(plan):
+def build_beat_camera_choreography_manifest(plan, beat_markers=None):
     analysis = plan.get("analysis", {})
-    tempo = analysis.get("tempo_bpm")
+    tempo = analysis.get("tempo_bpm") or (beat_markers or {}).get("tempo_bpm")
+    marker_by_clip = {
+        int(item.get("clip_index")): item
+        for item in (beat_markers or {}).get("scenes", [])
+        if item.get("clip_index") is not None
+    }
     scenes = []
     for item in plan.get("results", []):
         idx = int(item.get("clip_index", 1))
         scene = item.get("scene", {})
         camera = CAMERA_PROFILES[(idx - 1) % len(CAMERA_PROFILES)]
         choreography = CHOREOGRAPHY_PROFILES[(idx - 1) % len(CHOREOGRAPHY_PROFILES)]
+        markers = marker_by_clip.get(idx, {})
         scenes.append({
             "clip_index": idx,
             "start": scene.get("start"),
@@ -96,6 +166,8 @@ def build_beat_camera_choreography_manifest(plan):
             "duration": scene.get("duration"),
             "tempo_bpm": tempo,
             "beat_sync_rule": "Prioritize visible motion accents on kick, snare, bass drops, vocal accents, and phrase transitions.",
+            "primary_sync_targets_seconds": markers.get("primary_sync_targets_seconds", []),
+            "sync_density": markers.get("sync_density"),
             "camera_profile": camera,
             "choreography_profile": choreography,
             "negative_motion_rules": [
@@ -112,6 +184,36 @@ def build_beat_camera_choreography_manifest(plan):
         "movement_notes": analysis.get("movement_notes"),
         "camera_notes": analysis.get("camera_notes"),
         "scenes": scenes,
+    }
+
+
+def build_sync_score_manifest(plan, beat_markers):
+    scores = []
+    for scene in beat_markers.get("scenes", []):
+        density = int(scene.get("sync_density") or 0)
+        duration = float(scene.get("duration") or 1.0)
+        density_per_second = density / max(duration, 0.001)
+        if density_per_second >= 2.0:
+            difficulty = "high"
+            recommendation = "Use fewer, stronger visible accents; avoid constant motion chaos."
+        elif density_per_second >= 1.0:
+            difficulty = "medium"
+            recommendation = "Use clear downbeat and snare accents with controlled camera emphasis."
+        else:
+            difficulty = "low"
+            recommendation = "Use broader groove movement and hold stable camera continuity."
+        scores.append({
+            "clip_index": scene.get("clip_index"),
+            "duration": duration,
+            "sync_density": density,
+            "sync_density_per_second": round(density_per_second, 3),
+            "sync_difficulty": difficulty,
+            "recommendation": recommendation,
+        })
+    return {
+        "status": "planned",
+        "purpose": "Estimate which scenes need tighter motion timing or simpler choreography before generation.",
+        "scores": scores,
     }
 
 
@@ -168,24 +270,30 @@ def build_stitching_manifest(plan, submit_summary):
     }
 
 
-def write_orchestration_manifests(plan, preflight, submit_summary, output_dir):
+def write_orchestration_manifests(plan, preflight, submit_summary, output_dir, audio_path):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    beat_markers = extract_beat_markers(audio_path, plan)
     continuity = build_continuity_memory(plan)
-    beat_manifest = build_beat_camera_choreography_manifest(plan)
+    beat_manifest = build_beat_camera_choreography_manifest(plan, beat_markers=beat_markers)
+    sync_scores = build_sync_score_manifest(plan, beat_markers)
     retry_queue = build_retry_queue(preflight, submit_summary)
     stitching = build_stitching_manifest(plan, submit_summary)
 
     paths = {
+        "beat_markers": output_dir / "beat_markers.json",
         "continuity_memory": output_dir / "continuity_memory.json",
         "beat_camera_choreography": output_dir / "beat_camera_choreography_manifest.json",
+        "sync_scores": output_dir / "sync_score_manifest.json",
         "retry_queue": output_dir / "retry_queue.json",
         "stitching_manifest": output_dir / "stitching_manifest.json",
     }
 
+    write_json(paths["beat_markers"], beat_markers)
     write_json(paths["continuity_memory"], continuity)
     write_json(paths["beat_camera_choreography"], beat_manifest)
+    write_json(paths["sync_scores"], sync_scores)
     write_json(paths["retry_queue"], retry_queue)
     write_json(paths["stitching_manifest"], stitching)
 
@@ -248,6 +356,7 @@ def orchestrate(
         preflight=preflight,
         submit_summary=submit_summary,
         output_dir=DEFAULT_ORCHESTRATION_DIR,
+        audio_path=audio,
     )
 
     final_status = "complete" if preflight["status"] == "PASSED" else "failed_preflight"
