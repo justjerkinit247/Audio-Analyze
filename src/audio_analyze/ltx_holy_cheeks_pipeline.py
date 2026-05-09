@@ -29,6 +29,12 @@ DEFAULT_AUDIO = "inputs\\audio\\hop out the whip.mp3"
 DEFAULT_PLAN_JSON = "outputs\\ltx_video_run\\holy_cheeks_ltx_plan.json"
 DEFAULT_SEED_DIR = "inputs\\ltx_seed_images"
 
+# Words ignored when converting a seed image filename into prompt-control hints.
+SEED_HINT_STOP_TOKENS = {
+    "seed", "image", "img", "ltx", "scene", "clip", "final", "new", "v1", "v2", "v3",
+    "jpg", "jpeg", "png", "webp", "photo", "picture", "render", "output",
+}
+
 # LTX accepts audio/mpeg and audio/ogg. MP3 is preferred; OGG/Vorbis is fallback
 # because local Windows/Python audio backends do not always expose MP3 encoding.
 LTX_AUDIO_EXPORT_CANDIDATES = [
@@ -63,6 +69,21 @@ def normalize_resolution(value):
     return RESOLUTION_MAP.get(value, value)
 
 
+def seed_filename_hint(seed_image):
+    """Convert a seed image filename into usable prompt instructions.
+
+    Example:
+    01_low_squat_full_nude_four_adult_models_no_clothing_artifacts.png
+    -> low squat full nude four adult models no clothing artifacts
+    """
+    if not seed_image:
+        return ""
+    stem = Path(seed_image).stem.lower()
+    raw_tokens = re.split(r"[^a-z0-9]+", stem)
+    tokens = [token for token in raw_tokens if token and token not in SEED_HINT_STOP_TOKENS]
+    return " ".join(tokens).strip()
+
+
 def list_seed_images(seed_dir):
     seed_dir = Path(seed_dir)
     if not seed_dir.exists():
@@ -94,8 +115,8 @@ def analyze_audio(audio_path):
     elif tempo and tempo >= 110:
         energy = "high"
         pacing = "medium-fast"
-        movement = "locked rhythmic walking, visible groove, confident body accents on kick and snare"
-        camera = "smooth tracking, energized reframes, steady forward motion"
+        movement = "locked rhythmic movement, visible groove, confident body accents on kick and snare"
+        camera = "smooth tracking, energized reframes, steady controlled motion"
     elif tempo and tempo >= 85:
         energy = "moderate-high"
         pacing = "medium"
@@ -108,9 +129,9 @@ def analyze_audio(audio_path):
         camera = "slow push-ins, held compositions, gradual cinematic movement"
 
     if avg_centroid >= 3000:
-        lighting = "bright crisp high-contrast stage lighting"
+        lighting = "bright crisp high-contrast studio lighting"
     elif avg_centroid >= 1800:
-        lighting = "balanced polished music-video lighting"
+        lighting = "balanced polished studio lighting"
     else:
         lighting = "moody contrast with selective highlights"
 
@@ -150,8 +171,6 @@ def build_scenes(duration_seconds, max_scenes=None, scene_seconds=DEFAULT_SCENE_
         end = min(duration_seconds, start + scene_seconds)
 
         if end - start < MIN_LTX_AUDIO_SECONDS:
-            # If fixed 8-second stepping runs out of audio, distribute remaining audio
-            # across the requested seed-image count instead of silently dropping scenes.
             equal_scene_seconds = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, duration_seconds / scene_count))
             scenes = []
             for j in range(scene_count):
@@ -164,7 +183,7 @@ def build_scenes(duration_seconds, max_scenes=None, scene_seconds=DEFAULT_SCENE_
                     "start": round(equal_start, 3),
                     "end": round(equal_end, 3),
                     "duration": round(equal_end - equal_start, 3),
-                    "scene_type": "intro hook" if j == 0 else "closing phrase" if j == scene_count - 1 else "performance phrase",
+                    "scene_type": "intro phrase" if j == 0 else "closing phrase" if j == scene_count - 1 else "performance phrase",
                 })
             return scenes
 
@@ -173,28 +192,34 @@ def build_scenes(duration_seconds, max_scenes=None, scene_seconds=DEFAULT_SCENE_
             "start": round(start, 3),
             "end": round(end, 3),
             "duration": round(end - start, 3),
-            "scene_type": "intro hook" if i == 0 else "closing phrase" if i == scene_count - 1 else "performance phrase",
+            "scene_type": "intro phrase" if i == 0 else "closing phrase" if i == scene_count - 1 else "performance phrase",
         })
     return scenes
 
 
-def build_prompt(file_stem, analysis, scene):
+def build_prompt(file_stem, analysis, scene, seed_image=None):
     bpm = analysis.get("tempo_bpm")
     bpm_text = f"{bpm:.2f} BPM" if bpm else "the song rhythm"
+    hint = seed_filename_hint(seed_image)
+    hint_sentence = f"Seed filename visual instructions: {hint}. " if hint else ""
+
     return (
-        f"Vertical short-form music video for {file_stem}. "
+        f"Image-to-video continuation for {file_stem}. "
+        f"Use the seed image as the primary source of truth for subject count, body layout, pose, camera angle, framing, lighting, and background. "
+        f"{hint_sentence}"
         f"Scene {scene['scene_index']} covers {scene['start']:.2f}s to {scene['end']:.2f}s. "
         f"Motion must feel locked to {bpm_text}. "
-        f"Three gospel-performance characters continue walking forward in synchronized rhythm. "
-        f"The camera tracks backward smoothly and slightly arcs to the side. "
-        f"Performers glance back over their shoulders with confident playful stage presence. "
-        f"Two female performers add brief rhythmic hip and lower-body dance accents synced to the beat, "
-        f"styled as polished gospel-club choreography and not explicit. "
+        f"Keep the existing subjects anatomically consistent and preserve the seed image composition. "
+        f"Add controlled, beat-synced hip, glute, thigh, and lower-body dance motion without changing the pose category. "
+        f"Keep all movement grounded, natural, and humanly believable. "
+        f"Preserve low squat stance if present in the seed image; feet stay planted, knees stay bent, hips stay back. "
+        f"Camera motion should be subtle and controlled: {analysis['camera_notes']}. "
         f"Movement direction: {analysis['movement_notes']}. "
-        f"Camera direction: {analysis['camera_notes']}. "
         f"Lighting direction: {analysis['lighting_notes']}. "
-        f"White robe-inspired wardrobe, sacred-meets-club energy, clean facial consistency, no extra limbs, "
-        f"no random costume changes, no chaotic warping, no random scene change."
+        f"Do not add clothing, fabric, straps, accessories, props, body paint, censor blur, or coverage artifacts if they are not present in the seed image. "
+        f"No costume changes, no random wardrobe, no new people, no scene teleportation, no chaotic camera spin. "
+        f"No inverted poses, no bridge poses, no head-on-floor pose, no contortion, no impossible spine bending, no fused bodies, no extra limbs, no mutated hands or feet. "
+        f"Maintain clear readable anatomy, stable identities, realistic skin texture, and clean temporal continuity."
     )
 
 
@@ -216,9 +241,10 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
             "file_stem": audio_path.stem,
             "source_audio_path": str(audio_path.resolve()),
             "seed_image_used": str(image.resolve()),
+            "seed_filename_prompt_hint": seed_filename_hint(image),
             "scene": scene,
             "resolution": resolution,
-            "prompt_text": build_prompt(audio_path.stem, analysis, scene),
+            "prompt_text": build_prompt(audio_path.stem, analysis, scene, seed_image=image),
             "status": "planned",
         })
 
@@ -364,6 +390,7 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
         "file_stem": match["file_stem"],
         "scene": match["scene"],
         "seed_image_used": match["seed_image_used"],
+        "seed_filename_prompt_hint": match.get("seed_filename_prompt_hint"),
         "source_audio_path": match["source_audio_path"],
         "scene_audio_path": scene_audio_path,
         "scene_audio_format": scene_audio["format"],
@@ -438,7 +465,7 @@ def submit_all(plan_json, output_dir, model=DEFAULT_MODEL, guidance_scale=DEFAUL
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LTX Studio Holy Cheeks video pipeline")
+    parser = argparse.ArgumentParser(description="LTX Studio seed-image-first video pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p1 = sub.add_parser("plan")
