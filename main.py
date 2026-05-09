@@ -31,7 +31,6 @@ class RunPaths:
     assembled_dir: Path
     assembly_output: Path
     assembly_report: Path
-    root_orchestrator_report: Path
     run_orchestrator_report: Path
 
 
@@ -74,7 +73,6 @@ def build_run_paths(run_id: str) -> RunPaths:
         assembled_dir=run_dir / "assembled",
         assembly_output=run_dir / "assembled" / "final_music_video.mp4",
         assembly_report=run_dir / "assembled" / "assembly_report.json",
-        root_orchestrator_report=OUTPUT_ROOT / "orchestrator_report.json",
         run_orchestrator_report=run_dir / "orchestrator_report.json",
     )
 
@@ -104,21 +102,8 @@ def configure_orchestrator(paths: RunPaths):
     ltx_orchestrator.DEFAULT_PREFLIGHT_JSON = str(paths.preflight_json)
     ltx_orchestrator.DEFAULT_SUBMIT_DIR = str(paths.submissions_dir)
     ltx_orchestrator.DEFAULT_ORCHESTRATION_DIR = str(paths.orchestration_dir)
+    ltx_orchestrator.DEFAULT_ORCHESTRATOR_REPORT_JSON = str(paths.run_orchestrator_report)
     return ltx_orchestrator
-
-
-def move_root_orchestrator_report(paths: RunPaths) -> Optional[str]:
-    """The underlying orchestrator still writes this one report to OUTPUT_ROOT.
-    Move it into the active run folder so no future run leaks files into the flat root.
-    """
-    source = paths.root_orchestrator_report
-    if not source.exists():
-        return None
-    paths.run_orchestrator_report.parent.mkdir(parents=True, exist_ok=True)
-    if paths.run_orchestrator_report.exists():
-        paths.run_orchestrator_report.unlink()
-    shutil.move(str(source), str(paths.run_orchestrator_report))
-    return rel(paths.run_orchestrator_report)
 
 
 def copy_final_video(paths: RunPaths) -> Optional[str]:
@@ -170,6 +155,17 @@ def test_imports() -> int:
     return 0
 
 
+def assert_no_root_leaks(run_id: str) -> dict[str, Any]:
+    allowed_dirs = {"runs", "final_videos"}
+    leaks = []
+    if OUTPUT_ROOT.exists():
+        for path in OUTPUT_ROOT.iterdir():
+            if path.name in allowed_dirs:
+                continue
+            leaks.append(rel(path))
+    return {"run_id": run_id, "root_leak_count": len(leaks), "root_leaks": leaks}
+
+
 def run_pipeline(args: argparse.Namespace) -> int:
     audio = Path(args.audio).resolve() if args.audio else find_audio()
     if not audio or not audio.exists():
@@ -194,6 +190,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     print(f"Plan: {rel(output_plan)}")
     print(f"Submissions: {rel(paths.submissions_dir)}")
     print(f"Orchestration: {rel(paths.orchestration_dir)}")
+    print(f"Orchestrator report: {rel(paths.run_orchestrator_report)}")
 
     result = orchestrator.orchestrate(
         audio=str(audio),
@@ -205,9 +202,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
         model=args.model,
         guidance_scale=args.guidance_scale,
         live=args.live,
+        report_json=str(paths.run_orchestrator_report),
     )
 
-    moved_report = move_root_orchestrator_report(paths)
     pipeline_status = str(result.get("status", "unknown"))
     assembly_report: Optional[dict[str, Any]] = None
     final_copy: Optional[str] = None
@@ -236,11 +233,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
     if should_cleanup and not args.no_cleanup_json:
         cleanup_report = cleanup_temp_files(paths.run_dir, dry_run=False)
 
+    leak_report = assert_no_root_leaks(paths.run_id)
+
     header("PIPELINE RESULT")
     print(json.dumps(result, indent=2))
-    if moved_report:
-        header("MOVED ROOT REPORT")
-        print(moved_report)
     if assembly_report is not None:
         header("ASSEMBLY RESULT")
         print(json.dumps(assembly_report, indent=2))
@@ -250,10 +246,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
     if cleanup_report:
         header("CLEANUP REPORT")
         print(json.dumps(cleanup_report, indent=2))
+    header("ROOT LEAK CHECK")
+    print(json.dumps(leak_report, indent=2))
     header("RUN FOLDER")
     print(rel(paths.run_dir))
 
-    ok = pipeline_status == "complete"
+    ok = pipeline_status == "complete" and leak_report["root_leak_count"] == 0
     if args.assemble_after:
         ok = ok and assembly_report is not None and assembly_report.get("status") in {"complete", "dry_run"}
     return 0 if ok else 1
