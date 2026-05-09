@@ -24,6 +24,7 @@ DEFAULT_PLAN_JSON = "outputs/ltx_video_run/holy_cheeks_ltx_plan.json"
 DEFAULT_PREFLIGHT_JSON = "outputs/ltx_video_run/preflight_report.json"
 DEFAULT_SUBMIT_DIR = "outputs/ltx_video_run/submissions"
 DEFAULT_ORCHESTRATION_DIR = "outputs/ltx_video_run/orchestration"
+DEFAULT_ORCHESTRATOR_REPORT_JSON = "outputs/ltx_video_run/orchestrator_report.json"
 
 CAMERA_PROFILES = [
     "smooth backward tracking shot, vertical reel framing, stable group geography",
@@ -310,6 +311,7 @@ def orchestrate(
     model,
     guidance_scale,
     live,
+    report_json=None,
 ):
     print("=" * 60)
     print("LTX ORCHESTRATOR START")
@@ -371,7 +373,7 @@ def orchestrate(
         "summary": submit_summary,
     }
 
-    final_report = Path("outputs/ltx_video_run/orchestrator_report.json")
+    final_report = Path(report_json or DEFAULT_ORCHESTRATOR_REPORT_JSON)
     final_report.parent.mkdir(parents=True, exist_ok=True)
     final_report.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
@@ -399,6 +401,7 @@ def main():
     parser.add_argument("--model", default="ltx-2-3-pro")
     parser.add_argument("--guidance-scale", type=float, default=9.0)
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--report-json", default=DEFAULT_ORCHESTRATOR_REPORT_JSON)
 
     args = parser.parse_args()
 
@@ -412,6 +415,7 @@ def main():
         model=args.model,
         guidance_scale=args.guidance_scale,
         live=args.live,
+        report_json=args.report_json,
     )
 
 
