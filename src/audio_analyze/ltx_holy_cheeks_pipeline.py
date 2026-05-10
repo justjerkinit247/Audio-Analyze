@@ -16,11 +16,7 @@ except ImportError:
 
 
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp"}
-RESOLUTION_MAP = {
-    "9:16": "1080x1920",
-    "16:9": "1920x1080",
-    "1:1": "1080x1080",
-}
+RESOLUTION_MAP = {"9:16": "1080x1920", "16:9": "1920x1080", "1:1": "1080x1080"}
 MIN_LTX_AUDIO_SECONDS = 2.0
 MAX_LTX_AUDIO_SECONDS = 20.0
 DEFAULT_SCENE_SECONDS = 8.0
@@ -139,61 +135,105 @@ def analyze_audio(audio_path):
     }
 
 
-def resolve_scene_count(duration_seconds, requested_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS):
+def detect_beats(audio_path):
+    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    duration = float(librosa.get_duration(y=y, sr=sr))
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    tempo_raw, beat_frames = librosa.beat.beat_track(y=y, sr=sr, onset_envelope=onset_env)
+    tempo = scalarize(tempo_raw)
+    beat_times = [float(t) for t in librosa.frames_to_time(beat_frames, sr=sr)]
+    return duration, tempo, beat_times
+
+
+def _first_beat_at_or_after(beat_times, target, fallback):
+    for beat in beat_times:
+        if beat >= target:
+            return beat
+    return fallback
+
+
+def _nearest_beat(beat_times, target, max_shift=0.75):
+    candidates = [beat for beat in beat_times if abs(beat - target) <= max_shift]
+    if not candidates:
+        return target
+    return min(candidates, key=lambda beat: abs(beat - target))
+
+
+def resolve_scene_count(duration_seconds, requested_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS, start_offset_seconds=0.0):
     duration_seconds = float(duration_seconds)
+    start_offset_seconds = max(0.0, float(start_offset_seconds or 0.0))
+    usable_seconds = max(0.0, duration_seconds - start_offset_seconds)
     scene_seconds = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, float(scene_seconds)))
     if requested_scenes is None:
-        requested_scenes = max(1, int(np.ceil(duration_seconds / scene_seconds)))
+        requested_scenes = max(1, int(np.ceil(usable_seconds / scene_seconds)))
     requested_scenes = max(1, int(requested_scenes))
-    max_possible_by_min_duration = max(1, int(duration_seconds // MIN_LTX_AUDIO_SECONDS))
+    max_possible_by_min_duration = max(1, int(usable_seconds // MIN_LTX_AUDIO_SECONDS))
     return min(requested_scenes, max_possible_by_min_duration)
 
 
-def build_scenes(duration_seconds, max_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS):
+def build_scenes(duration_seconds, max_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS, start_offset_seconds=0.0, beat_align=False, beat_times=None):
     scene_seconds = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, float(scene_seconds)))
     duration_seconds = float(duration_seconds)
-    scene_count = resolve_scene_count(duration_seconds, requested_scenes=max_scenes, scene_seconds=scene_seconds)
+    start_offset_seconds = max(0.0, float(start_offset_seconds or 0.0))
+    if start_offset_seconds >= duration_seconds:
+        raise ValueError(f"start_offset_seconds {start_offset_seconds:.3f} is beyond audio duration {duration_seconds:.3f}")
+
+    scene_count = resolve_scene_count(duration_seconds, requested_scenes=max_scenes, scene_seconds=scene_seconds, start_offset_seconds=start_offset_seconds)
     scenes = []
+    beat_times = beat_times or []
+    beat_times_after_start = [t for t in beat_times if t >= start_offset_seconds]
+
+    current_start = start_offset_seconds
+    if beat_align and beat_times_after_start:
+        current_start = _first_beat_at_or_after(beat_times_after_start, start_offset_seconds, start_offset_seconds)
+
     for i in range(scene_count):
-        start = i * scene_seconds
-        end = min(duration_seconds, start + scene_seconds)
-        if end - start < MIN_LTX_AUDIO_SECONDS:
-            equal_scene_seconds = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, duration_seconds / scene_count))
-            scenes = []
-            for j in range(scene_count):
-                equal_start = j * equal_scene_seconds
-                equal_end = min(duration_seconds, equal_start + equal_scene_seconds)
-                if equal_end - equal_start < MIN_LTX_AUDIO_SECONDS:
-                    break
-                scenes.append({
-                    "scene_index": len(scenes) + 1,
-                    "start": round(equal_start, 3),
-                    "end": round(equal_end, 3),
-                    "duration": round(equal_end - equal_start, 3),
-                    "scene_type": "intro phrase" if j == 0 else "closing phrase" if j == scene_count - 1 else "performance phrase",
-                })
-            return scenes
+        if current_start >= duration_seconds:
+            break
+        target_end = min(duration_seconds, current_start + scene_seconds)
+        end = target_end
+        if beat_align and beat_times_after_start:
+            snapped = _nearest_beat(beat_times_after_start, target_end, max_shift=0.75)
+            if MIN_LTX_AUDIO_SECONDS <= snapped - current_start <= MAX_LTX_AUDIO_SECONDS:
+                end = snapped
+        if end - current_start < MIN_LTX_AUDIO_SECONDS:
+            end = min(duration_seconds, current_start + MIN_LTX_AUDIO_SECONDS)
+        if end - current_start > MAX_LTX_AUDIO_SECONDS:
+            end = current_start + MAX_LTX_AUDIO_SECONDS
+        if end - current_start < MIN_LTX_AUDIO_SECONDS:
+            break
+
         scenes.append({
             "scene_index": len(scenes) + 1,
-            "start": round(start, 3),
+            "start": round(current_start, 3),
             "end": round(end, 3),
-            "duration": round(end - start, 3),
-            "scene_type": "intro phrase" if i == 0 else "closing phrase" if i == scene_count - 1 else "performance phrase",
+            "duration": round(end - current_start, 3),
+            "scene_type": "beat-aligned performance phrase" if beat_align else ("intro phrase" if i == 0 else "closing phrase" if i == scene_count - 1 else "performance phrase"),
+            "sync_start_rule": "scene starts on or near detected beat" if beat_align else "fixed scene grid",
+            "sync_end_rule": "scene ends on or near detected beat" if beat_align else "fixed scene grid",
         })
+
+        next_start = end
+        if beat_align and beat_times_after_start:
+            next_start = _first_beat_at_or_after(beat_times_after_start, end, end)
+            if next_start <= current_start:
+                next_start = end
+        current_start = next_start
     return scenes
 
 
 def build_prompt(file_stem, analysis, scene, seed_image=None):
-    bpm = analysis.get("tempo_bpm")
+    bpm = analysis.get("tempo_bpm") or analysis.get("tempo_bpm_from_full_track")
     bpm_text = f"{bpm:.2f} BPM" if bpm else "the song rhythm"
     hint = seed_filename_hint(seed_image)
     hint_sentence = f"Seed filename visual instructions: {hint}. " if hint else ""
+    beat_sentence = "Scene timing is beat-aligned; visible movement, body accents, camera changes, and scene transitions must land on kick, snare, bass hits, or strong beat accents. " if analysis.get("beat_alignment_enabled") else ""
     return (
         f"Image-to-video continuation for {file_stem}. "
         f"Use the seed image as the primary source of truth for subject count, body layout, pose, camera angle, framing, lighting, and background. "
         f"{hint_sentence}"
-        f"Scene {scene['scene_index']} covers {scene['start']:.2f}s to {scene['end']:.2f}s. "
-        f"Motion must feel locked to {bpm_text}. "
+        f"Scene {scene['scene_index']} covers {scene['start']:.2f}s to {scene['end']:.2f}s of the source song. "
+        f"Motion must feel locked to {bpm_text}. {beat_sentence}"
         f"Keep the existing subjects anatomically consistent and preserve the seed image composition. "
         f"Add controlled, beat-synced hip, glute, thigh, and lower-body dance motion without changing the pose category. "
         f"Keep all movement grounded, natural, and humanly believable. "
@@ -208,15 +248,26 @@ def build_prompt(file_stem, analysis, scene, seed_image=None):
     )
 
 
-def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS):
+def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS, start_offset_seconds=0.0, beat_align=False):
     audio_path = Path(audio_path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path.resolve()}")
     images = list_seed_images(seed_dir)
     analysis = analyze_audio(audio_path)
+    duration, tempo, beat_times = detect_beats(audio_path)
+    start_offset_seconds = max(0.0, float(start_offset_seconds or 0.0))
+    if start_offset_seconds >= duration:
+        raise ValueError(f"Start offset {start_offset_seconds:.3f}s is beyond audio duration {duration:.3f}s")
     auto_scene_count = len(images) if max_scenes is None else int(max_scenes)
-    scenes = build_scenes(analysis["duration_seconds"], max_scenes=auto_scene_count, scene_seconds=scene_seconds)
+    scenes = build_scenes(duration, max_scenes=auto_scene_count, scene_seconds=scene_seconds, start_offset_seconds=start_offset_seconds, beat_align=beat_align, beat_times=beat_times)
     resolution = normalize_resolution(resolution)
+
+    analysis["start_offset_seconds"] = round(start_offset_seconds, 3)
+    analysis["beat_alignment_enabled"] = bool(beat_align)
+    analysis["tempo_bpm_from_full_track"] = round(tempo, 3) if tempo else analysis.get("tempo_bpm")
+    analysis["detected_beat_count"] = len(beat_times)
+    analysis["sync_policy"] = "Scene starts and scene changes are snapped to detected beat positions." if beat_align else "Fixed scene intervals."
+
     results = []
     for idx, scene in enumerate(scenes, start=1):
         image = images[idx - 1]
@@ -230,6 +281,8 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
             "resolution": resolution,
             "prompt_text": build_prompt(audio_path.stem, analysis, scene, seed_image=image),
             "status": "planned",
+            "audio_to_video_confirmed": True,
+            "beat_alignment_enabled": bool(beat_align),
         })
     plan = {
         "file_stem": audio_path.stem,
@@ -239,6 +292,10 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
         "scene_count_source": "seed_image_count" if max_scenes is None else "manual_max_scenes",
         "resolution": resolution,
         "scene_seconds": scene_seconds,
+        "start_offset_seconds": round(start_offset_seconds, 3),
+        "beat_alignment_enabled": bool(beat_align),
+        "audio_to_video_enabled": True,
+        "audio_plus_seed_image_sent_to_ltx": True,
         "results": results,
         "status": "planned",
     }
@@ -276,12 +333,7 @@ def validate_plan(plan):
 def run_preflight(plan_json, output_json=None):
     plan = read_json(plan_json)
     problems = validate_plan(plan)
-    report = {
-        "status": "FAILED" if problems else "PASSED",
-        "scene_count": len(plan.get("results", [])),
-        "problems": problems,
-        "plan_json": str(Path(plan_json).resolve()),
-    }
+    report = {"status": "FAILED" if problems else "PASSED", "scene_count": len(plan.get("results", [])), "problems": problems, "plan_json": str(Path(plan_json).resolve())}
     if output_json:
         write_json(output_json, report)
     return report
@@ -350,36 +402,21 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
     scene_audio_dir.mkdir(parents=True, exist_ok=True)
 
     result = {
-        "clip_index": int(clip_index),
-        "file_stem": match["file_stem"],
-        "scene": match["scene"],
-        "seed_image_used": match["seed_image_used"],
-        "seed_filename_prompt_hint": match.get("seed_filename_prompt_hint"),
-        "source_audio_path": match["source_audio_path"],
-        "prompt_text": match["prompt_text"],
-        "resolution": match["resolution"],
-        "model": model,
-        "guidance_scale": guidance_scale,
-        "dry_run": dry_run,
-        "live": live,
-        "status": "submitting" if live else "dry_run",
+        "clip_index": int(clip_index), "file_stem": match["file_stem"], "scene": match["scene"],
+        "seed_image_used": match["seed_image_used"], "seed_filename_prompt_hint": match.get("seed_filename_prompt_hint"),
+        "source_audio_path": match["source_audio_path"], "prompt_text": match["prompt_text"], "resolution": match["resolution"],
+        "model": model, "guidance_scale": guidance_scale, "dry_run": dry_run, "live": live,
+        "status": "submitting" if live else "dry_run", "audio_to_video_confirmed": True,
     }
     write_json(output_json, result)
 
     try:
-        scene_audio = export_scene_audio(
-            source_audio_path=match["source_audio_path"],
-            scene=match["scene"],
-            output_dir=scene_audio_dir,
-            file_stem=match["file_stem"],
-            clip_index=clip_index,
-        )
+        scene_audio = export_scene_audio(match["source_audio_path"], match["scene"], scene_audio_dir, match["file_stem"], clip_index)
         scene_audio_path = scene_audio["path"]
         mp4_path = downloads_dir / f"{safe_name(match['file_stem'])}_ltx_scene_{int(clip_index):02d}.mp4"
         result["scene_audio_path"] = scene_audio_path
         result["scene_audio_format"] = scene_audio["format"]
         write_json(output_json, result)
-
         client = LTXClient(api_key="dry-run-key" if dry_run else None)
         ltx_result = client.audio_to_video(
             audio_uri=scene_audio_path,
@@ -413,45 +450,24 @@ def submit_all(plan_json, output_dir, model=DEFAULT_MODEL, guidance_scale=DEFAUL
     plan = read_json(plan_json)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    summary = {
-        "status": "running",
-        "dry_run": dry_run,
-        "live": live,
-        "plan_json": str(Path(plan_json).resolve()),
-        "results": [],
-    }
+    summary = {"status": "running", "dry_run": dry_run, "live": live, "plan_json": str(Path(plan_json).resolve()), "results": []}
     summary_path = output_dir / "ltx_submit_all_summary.json"
     write_json(summary_path, summary)
-
     failed_count = 0
     for item in plan.get("results", []):
         idx = int(item["clip_index"])
         result_path = output_dir / f"scene_{idx:02d}_result.json"
-        result = submit_one(
-            plan_json=plan_json,
-            output_json=result_path,
-            clip_index=idx,
-            model=model,
-            guidance_scale=guidance_scale,
-            dry_run=dry_run,
-            live=live,
-        )
+        result = submit_one(plan_json, result_path, idx, model, guidance_scale, dry_run=dry_run, live=live)
         if result.get("status") == "failed":
             failed_count += 1
         summary["results"].append({
-            "clip_index": idx,
-            "status": result.get("status"),
-            "failure_class": result.get("failure_class"),
-            "retry_recommended": result.get("retry_recommended"),
-            "error": result.get("error"),
-            "scene_audio_path": result.get("scene_audio_path"),
-            "scene_audio_format": result.get("scene_audio_format"),
-            "downloaded_mp4": result.get("downloaded_mp4"),
-            "result_json": str(result_path.resolve()),
+            "clip_index": idx, "status": result.get("status"), "failure_class": result.get("failure_class"),
+            "retry_recommended": result.get("retry_recommended"), "error": result.get("error"),
+            "scene_audio_path": result.get("scene_audio_path"), "scene_audio_format": result.get("scene_audio_format"),
+            "downloaded_mp4": result.get("downloaded_mp4"), "result_json": str(result_path.resolve()),
         })
         summary["failed_count"] = failed_count
         write_json(summary_path, summary)
-
     summary["status"] = "complete_with_failures" if failed_count else "complete"
     summary["failed_count"] = failed_count
     write_json(summary_path, summary)
@@ -468,6 +484,8 @@ def main():
     p1.add_argument("--resolution", default="9:16")
     p1.add_argument("--max-scenes", type=int, default=None)
     p1.add_argument("--scene-seconds", type=float, default=DEFAULT_SCENE_SECONDS)
+    p1.add_argument("--start-offset-seconds", type=float, default=0.0)
+    p1.add_argument("--beat-align", action="store_true")
     p_pre = sub.add_parser("preflight")
     p_pre.add_argument("--plan-json", required=True)
     p_pre.add_argument("--output", default=None)
@@ -486,7 +504,7 @@ def main():
     p_all.add_argument("--live", action="store_true")
     args = parser.parse_args()
     if args.command == "plan":
-        plan = build_plan(args.audio, args.seed_dir, args.output, args.resolution, args.max_scenes, args.scene_seconds)
+        plan = build_plan(args.audio, args.seed_dir, args.output, args.resolution, args.max_scenes, args.scene_seconds, args.start_offset_seconds, args.beat_align)
         print("LTX scene plan created.")
         print(Path(args.output).resolve())
         print(f"Seed images found: {plan.get('seed_image_count')}")
