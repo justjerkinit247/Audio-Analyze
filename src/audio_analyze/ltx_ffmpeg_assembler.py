@@ -4,6 +4,8 @@ import json
 import shutil
 import subprocess
 
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
+
 
 def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
@@ -43,6 +45,27 @@ def collect_clip_paths(stitching_manifest):
     return clips, missing
 
 
+def collect_clip_paths_from_folder(input_folder):
+    input_folder = Path(input_folder)
+    if not input_folder.exists():
+        raise FileNotFoundError(f"Input folder not found: {input_folder}")
+    clips = []
+    for path in sorted(input_folder.rglob("*"), key=lambda p: str(p).lower()):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        parts_lower = {part.lower() for part in path.parts}
+        if "assembled" in parts_lower:
+            continue
+        if "final_music_video" in path.name.lower():
+            continue
+        if path.stat().st_size <= 0:
+            continue
+        clips.append({"clip_index": len(clips) + 1, "path": path})
+    return clips
+
+
 def write_concat_list(clips, output_path):
     lines = []
     for clip in clips:
@@ -52,29 +75,31 @@ def write_concat_list(clips, output_path):
     Path(output_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def assemble_from_manifest(stitching_manifest, output_mp4, audio_path=None, report_json=None, dry_run=False):
+def _run_ffmpeg(cmd):
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return {
+        "returncode": result.returncode,
+        "stdout": result.stdout[-4000:],
+        "stderr": result.stderr[-4000:],
+    }
+
+
+def assemble_clips(clips, output_mp4, audio_path=None, report_json=None, dry_run=False, audio_start_seconds=0.0, source_label=None):
     ffmpeg = require_ffmpeg()
     output_mp4 = Path(output_mp4)
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
-
-    clips, missing = collect_clip_paths(stitching_manifest)
     concat_list = output_mp4.parent / "ffmpeg_concat_list.txt"
     write_concat_list(clips, concat_list)
 
     if not clips:
-        report = {
-            "status": "failed_no_clips",
-            "stitching_manifest": str(Path(stitching_manifest).resolve()),
-            "missing": missing,
-        }
+        report = {"status": "failed_no_clips", "source": source_label, "clip_count": 0}
         if report_json:
             write_json(report_json, report)
         return report
 
     temp_video = output_mp4.with_suffix(".video_only.mp4")
     concat_cmd = [
-        ffmpeg,
-        "-y",
+        ffmpeg, "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", str(concat_list),
@@ -82,44 +107,36 @@ def assemble_from_manifest(stitching_manifest, output_mp4, audio_path=None, repo
         str(temp_video),
     ]
 
-    final_cmd = concat_cmd
+    final_cmd = [ffmpeg, "-y", "-i", str(temp_video), "-c", "copy", str(output_mp4)]
     if audio_path:
-        final_cmd = [
-            ffmpeg,
-            "-y",
-            "-i", str(temp_video),
+        final_cmd = [ffmpeg, "-y", "-i", str(temp_video)]
+        audio_start_seconds = max(0.0, float(audio_start_seconds or 0.0))
+        if audio_start_seconds > 0:
+            final_cmd.extend(["-ss", str(audio_start_seconds)])
+        final_cmd.extend([
             "-i", str(Path(audio_path)),
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac",
+            "-b:a", "192k",
             "-shortest",
             str(output_mp4),
-        ]
-    else:
-        final_cmd = [
-            ffmpeg,
-            "-y",
-            "-i", str(temp_video),
-            "-c", "copy",
-            str(output_mp4),
-        ]
+        ])
 
     report = {
         "status": "dry_run" if dry_run else "running",
+        "source": source_label,
         "ffmpeg": ffmpeg,
-        "stitching_manifest": str(Path(stitching_manifest).resolve()),
         "clip_count": len(clips),
         "clips": [{"clip_index": c["clip_index"], "path": str(c["path"].resolve())} for c in clips],
-        "missing": missing,
         "concat_list": str(concat_list.resolve()),
         "temp_video": str(temp_video.resolve()),
         "output_mp4": str(output_mp4.resolve()),
         "audio_path": str(Path(audio_path).resolve()) if audio_path else None,
-        "commands": {
-            "concat": concat_cmd,
-            "mux_audio": final_cmd,
-        },
+        "audio_start_seconds": float(audio_start_seconds or 0.0),
+        "clip_audio_rule": "ignored during audio mux; final audio comes from --audio when provided",
+        "commands": {"concat": concat_cmd, "mux_audio": final_cmd},
     }
 
     if dry_run:
@@ -127,47 +144,97 @@ def assemble_from_manifest(stitching_manifest, output_mp4, audio_path=None, repo
             write_json(report_json, report)
         return report
 
-    concat_result = subprocess.run(concat_cmd, capture_output=True, text=True)
-    report["concat_returncode"] = concat_result.returncode
-    report["concat_stdout"] = concat_result.stdout[-4000:]
-    report["concat_stderr"] = concat_result.stderr[-4000:]
-    if concat_result.returncode != 0:
+    concat_result = _run_ffmpeg(concat_cmd)
+    report["concat_returncode"] = concat_result["returncode"]
+    report["concat_stdout"] = concat_result["stdout"]
+    report["concat_stderr"] = concat_result["stderr"]
+    if concat_result["returncode"] != 0:
         report["status"] = "failed_concat"
         if report_json:
             write_json(report_json, report)
         return report
 
-    final_result = subprocess.run(final_cmd, capture_output=True, text=True)
-    report["final_returncode"] = final_result.returncode
-    report["final_stdout"] = final_result.stdout[-4000:]
-    report["final_stderr"] = final_result.stderr[-4000:]
-    report["status"] = "complete" if final_result.returncode == 0 else "failed_final_mux"
+    final_result = _run_ffmpeg(final_cmd)
+    report["final_returncode"] = final_result["returncode"]
+    report["final_stdout"] = final_result["stdout"]
+    report["final_stderr"] = final_result["stderr"]
+    report["status"] = "complete" if final_result["returncode"] == 0 else "failed_final_mux"
 
     if report_json:
         write_json(report_json, report)
     return report
 
 
+def assemble_from_manifest(stitching_manifest, output_mp4, audio_path=None, report_json=None, dry_run=False, audio_start_seconds=0.0):
+    clips, missing = collect_clip_paths(stitching_manifest)
+    report = assemble_clips(
+        clips=clips,
+        output_mp4=output_mp4,
+        audio_path=audio_path,
+        report_json=None,
+        dry_run=dry_run,
+        audio_start_seconds=audio_start_seconds,
+        source_label=str(Path(stitching_manifest).resolve()),
+    )
+    report["stitching_manifest"] = str(Path(stitching_manifest).resolve())
+    report["missing"] = missing
+    if report_json:
+        write_json(report_json, report)
+    return report
+
+
+def assemble_from_folder(input_folder, output_mp4, audio_path=None, report_json=None, dry_run=False, audio_start_seconds=0.0):
+    clips = collect_clip_paths_from_folder(input_folder)
+    report = assemble_clips(
+        clips=clips,
+        output_mp4=output_mp4,
+        audio_path=audio_path,
+        report_json=None,
+        dry_run=dry_run,
+        audio_start_seconds=audio_start_seconds,
+        source_label=str(Path(input_folder).resolve()),
+    )
+    report["input_folder"] = str(Path(input_folder).resolve())
+    if report_json:
+        write_json(report_json, report)
+    return report
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Assemble LTX scene clips with FFmpeg from stitching_manifest.json")
-    parser.add_argument("--stitching-manifest", default="outputs/ltx_video_run/orchestration/stitching_manifest.json")
+    parser = argparse.ArgumentParser(description="Assemble LTX scene clips with FFmpeg from stitching_manifest.json or a run folder")
+    parser.add_argument("--stitching-manifest", default=None)
+    parser.add_argument("--input-folder", default=None, help="Folder to scan recursively for MP4/MOV clips when no manifest is available.")
     parser.add_argument("--output", default="outputs/ltx_video_run/assembled/ltx_assembled_reel.mp4")
     parser.add_argument("--audio", default=None)
+    parser.add_argument("--audio-start-seconds", type=float, default=0.0, help="Start the supplied audio at this offset, e.g. 85 for 1:25.")
     parser.add_argument("--report-json", default="outputs/ltx_video_run/assembled/ffmpeg_assembly_report.json")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    report = assemble_from_manifest(
-        stitching_manifest=args.stitching_manifest,
-        output_mp4=args.output,
-        audio_path=args.audio,
-        report_json=args.report_json,
-        dry_run=args.dry_run,
-    )
+    if args.input_folder:
+        report = assemble_from_folder(
+            input_folder=args.input_folder,
+            output_mp4=args.output,
+            audio_path=args.audio,
+            report_json=args.report_json,
+            dry_run=args.dry_run,
+            audio_start_seconds=args.audio_start_seconds,
+        )
+    else:
+        manifest = args.stitching_manifest or "outputs/ltx_video_run/orchestration/stitching_manifest.json"
+        report = assemble_from_manifest(
+            stitching_manifest=manifest,
+            output_mp4=args.output,
+            audio_path=args.audio,
+            report_json=args.report_json,
+            dry_run=args.dry_run,
+            audio_start_seconds=args.audio_start_seconds,
+        )
 
     print(f"FFmpeg assembly status: {report['status']}")
     print(f"Clip count: {report.get('clip_count')}")
     print(f"Output: {report.get('output_mp4')}")
+    print(f"Audio start seconds: {report.get('audio_start_seconds')}")
     if report.get("missing"):
         for item in report["missing"]:
             print(f"MISSING: {item}")
