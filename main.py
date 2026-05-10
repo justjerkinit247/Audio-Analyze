@@ -191,6 +191,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
     print(f"Submissions: {rel(paths.submissions_dir)}")
     print(f"Orchestration: {rel(paths.orchestration_dir)}")
     print(f"Orchestrator report: {rel(paths.run_orchestrator_report)}")
+    print(f"Start offset seconds: {args.start_offset_seconds}")
+    print(f"Beat alignment enabled: {args.beat_align}")
 
     result = orchestrator.orchestrate(
         audio=str(audio),
@@ -203,6 +205,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
         guidance_scale=args.guidance_scale,
         live=args.live,
         report_json=str(paths.run_orchestrator_report),
+        start_offset_seconds=args.start_offset_seconds,
+        beat_align=args.beat_align,
     )
 
     pipeline_status = str(result.get("status", "unknown"))
@@ -323,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolution", default="9:16")
     parser.add_argument("--max-scenes", type=int, default=None)
     parser.add_argument("--scene-seconds", type=float, default=8.0)
+    parser.add_argument("--start-offset-seconds", type=float, default=0.0)
+    parser.add_argument("--beat-align", action="store_true")
     parser.add_argument("--model", default="ltx-2-3-pro")
     parser.add_argument("--guidance-scale", type=float, default=9.0)
     parser.add_argument("--run-id", default=None)
