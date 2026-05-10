@@ -27,20 +27,20 @@ DEFAULT_ORCHESTRATION_DIR = "outputs/ltx_video_run/orchestration"
 DEFAULT_ORCHESTRATOR_REPORT_JSON = "outputs/ltx_video_run/orchestrator_report.json"
 
 CAMERA_PROFILES = [
-    "smooth backward tracking shot, vertical reel framing, stable group geography",
-    "slight side arc while tracking backward, readable over-shoulder performance moment",
+    "smooth low tracking shot, stable vertical reel framing, readable subject geography",
+    "slight side arc with controlled camera drift, readable over-shoulder performance moment",
     "wide vertical choreography frame, low-angle energy, full-body movement readable",
     "controlled camera orbit with mild parallax, no random spin or snap zoom",
-    "medium-close performer confidence shot, stable faces, controlled upper-body rhythm",
+    "medium-close performance confidence shot, stable identity, controlled rhythm",
     "smooth settle into final pose, camera stops cleanly on the last beat",
 ]
 
 CHOREOGRAPHY_PROFILES = [
-    "confident synchronized walk, subtle shoulder groove on the downbeat",
-    "over-shoulder glance timed to a vocal or snare accent",
+    "confident beat-synced movement, subtle shoulder and hip groove on the downbeat",
+    "over-shoulder glance timed to a vocal, kick, or snare accent",
     "brief polished hip-accent choreography, rhythmic and performance-art focused",
-    "group walk continues with synchronized footwork and robe movement",
-    "face-forward charisma, shoulder accents, clean hand placement",
+    "group movement continues with synchronized lower-body accents and stable spacing",
+    "camera-readable performance energy, controlled hand placement, no anatomy drift",
     "unified final pose or group finish landing visibly on the final beat",
 ]
 
@@ -120,13 +120,12 @@ def build_continuity_memory(plan):
     scenes = plan.get("results", [])
     memory = {
         "status": "planned",
-        "purpose": "Keep visual identity, wardrobe, camera geography, and scene direction stable across generated clips.",
+        "purpose": "Keep subject identity, body layout, camera geography, and scene direction stable across generated clips.",
         "global_continuity_rules": [
-            "Use the same performer identities across all scenes.",
-            "Preserve white robe-inspired wardrobe unless explicitly changed.",
-            "Preserve vertical reel framing and forward walking geography.",
+            "Use the seed image as the source of truth for subject count, identity, pose, and framing.",
+            "Preserve vertical reel framing and readable subject geography.",
             "Keep movement polished, rhythmic, and beat-aware rather than chaotic.",
-            "Avoid sudden costume changes, face changes, extra limbs, and random scene teleportation.",
+            "Avoid sudden body layout changes, face changes, extra limbs, and random scene teleportation.",
         ],
         "scenes": [],
     }
@@ -140,14 +139,14 @@ def build_continuity_memory(plan):
             "scene_time": item.get("scene", {}),
             "previous_scene": previous_idx,
             "next_scene": next_idx,
-            "continuity_goal": "Maintain performer identity, wardrobe, rhythm, and camera geography from adjacent scenes.",
+            "continuity_goal": "Maintain subject identity, pose category, rhythm, and camera geography from adjacent scenes.",
         })
     return memory
 
 
 def build_beat_camera_choreography_manifest(plan, beat_markers=None):
     analysis = plan.get("analysis", {})
-    tempo = analysis.get("tempo_bpm") or (beat_markers or {}).get("tempo_bpm")
+    tempo = analysis.get("tempo_bpm") or analysis.get("tempo_bpm_from_full_track") or (beat_markers or {}).get("tempo_bpm")
     marker_by_clip = {
         int(item.get("clip_index")): item
         for item in (beat_markers or {}).get("scenes", [])
@@ -166,6 +165,7 @@ def build_beat_camera_choreography_manifest(plan, beat_markers=None):
             "end": scene.get("end"),
             "duration": scene.get("duration"),
             "tempo_bpm": tempo,
+            "beat_alignment_enabled": bool(plan.get("beat_alignment_enabled")),
             "beat_sync_rule": "Prioritize visible motion accents on kick, snare, bass drops, vocal accents, and phrase transitions.",
             "primary_sync_targets_seconds": markers.get("primary_sync_targets_seconds", []),
             "sync_density": markers.get("sync_density"),
@@ -175,12 +175,14 @@ def build_beat_camera_choreography_manifest(plan, beat_markers=None):
                 "no off-beat random shaking",
                 "no chaotic camera spin",
                 "no warped anatomy",
-                "no random background or wardrobe mutation",
+                "no random background or body layout mutation",
             ],
         })
     return {
         "status": "planned",
         "tempo_bpm": tempo,
+        "start_offset_seconds": plan.get("start_offset_seconds"),
+        "beat_alignment_enabled": bool(plan.get("beat_alignment_enabled")),
         "edit_pacing": analysis.get("edit_pacing"),
         "movement_notes": analysis.get("movement_notes"),
         "camera_notes": analysis.get("camera_notes"),
@@ -262,11 +264,12 @@ def build_stitching_manifest(plan, submit_summary):
             "result_json": submit_item.get("result_json"),
             "stitch_order": idx,
             "transition": "hard_cut",
-            "sync_rule": "Clip duration should match planned scene duration; align cuts to scene start/end times.",
+            "sync_rule": "Clip duration should match planned scene duration; cuts are aligned to planned scene beat boundaries when beat_align is enabled.",
         })
     return {
         "status": "planned",
         "assembly_strategy": "scene_order_hard_cuts_first_then_optional_transition_cleanup",
+        "beat_alignment_enabled": bool(plan.get("beat_alignment_enabled")),
         "clips": clips,
     }
 
@@ -312,6 +315,8 @@ def orchestrate(
     guidance_scale,
     live,
     report_json=None,
+    start_offset_seconds=0.0,
+    beat_align=False,
 ):
     print("=" * 60)
     print("LTX ORCHESTRATOR START")
@@ -325,15 +330,19 @@ def orchestrate(
         resolution=resolution,
         max_scenes=max_scenes,
         scene_seconds=scene_seconds,
+        start_offset_seconds=start_offset_seconds,
+        beat_align=beat_align,
     )
 
     print(f"Plan created: {Path(output_plan).resolve()}")
     print(f"Scene count: {plan.get('scene_count')}")
     print(f"Seed image count: {plan.get('seed_image_count')}")
+    print(f"Start offset seconds: {plan.get('start_offset_seconds')}")
+    print(f"Beat alignment enabled: {plan.get('beat_alignment_enabled')}")
+    print(f"Audio + seed image sent to LTX: {plan.get('audio_plus_seed_image_sent_to_ltx')}")
 
     print("[2/4] Running preflight...")
     preflight = run_preflight(output_plan, DEFAULT_PREFLIGHT_JSON)
-
     print(f"Preflight status: {preflight['status']}")
 
     submit_summary = None
@@ -366,6 +375,10 @@ def orchestrate(
         "status": final_status,
         "timestamp": timestamp(),
         "live": live,
+        "start_offset_seconds": plan.get("start_offset_seconds"),
+        "beat_alignment_enabled": plan.get("beat_alignment_enabled"),
+        "audio_to_video_enabled": plan.get("audio_to_video_enabled"),
+        "audio_plus_seed_image_sent_to_ltx": plan.get("audio_plus_seed_image_sent_to_ltx"),
         "plan_json": str(Path(output_plan).resolve()),
         "preflight_json": str(Path(DEFAULT_PREFLIGHT_JSON).resolve()),
         "submit_dir": str(Path(DEFAULT_SUBMIT_DIR).resolve()),
@@ -385,24 +398,23 @@ def orchestrate(
     print(f"Final report: {final_report.resolve()}")
     for label, path in manifest_paths.items():
         print(f"{label}: {path}")
-
     return result
 
 
 def main():
     parser = argparse.ArgumentParser(description="LTX orchestration wrapper")
-
     parser.add_argument("--audio", required=True)
     parser.add_argument("--seed-dir", default="inputs/ltx_seed_images")
     parser.add_argument("--output-plan", default=DEFAULT_PLAN_JSON)
     parser.add_argument("--resolution", default="9:16")
     parser.add_argument("--max-scenes", type=int, default=None)
     parser.add_argument("--scene-seconds", type=float, default=8.0)
+    parser.add_argument("--start-offset-seconds", type=float, default=0.0)
+    parser.add_argument("--beat-align", action="store_true")
     parser.add_argument("--model", default="ltx-2-3-pro")
     parser.add_argument("--guidance-scale", type=float, default=9.0)
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--report-json", default=DEFAULT_ORCHESTRATOR_REPORT_JSON)
-
     args = parser.parse_args()
 
     orchestrate(
@@ -416,6 +428,8 @@ def main():
         guidance_scale=args.guidance_scale,
         live=args.live,
         report_json=args.report_json,
+        start_offset_seconds=args.start_offset_seconds,
+        beat_align=args.beat_align,
     )
 
 
