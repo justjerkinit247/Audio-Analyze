@@ -1,19 +1,20 @@
 # Real-input LTX + ASMO runner.
-# Reads real audio, real .txt lyrics, and real seed images from fixed input folders.
-# Seed image folder is: inputs\seed images
+# Auto-reads real audio from inputs\audio.
+# Auto-reads real .txt lyrics from inputs\lyrics.
+# Auto-reads real seed images from inputs\seed images.
 # Does not create fake lyrics or fake visual content.
 
 param(
     [Parameter(Mandatory = $true)]
     [string]$RunName,
 
-    [Parameter(Mandatory = $true)]
-    [string]$AudioFileName,
+    # Optional override. If omitted, runner auto-selects the newest supported audio file from inputs\audio.
+    [string]$AudioFileName = "",
 
-    [Parameter(Mandatory = $true)]
-    [string]$LyricsFileName,
+    # Optional override. If omitted, runner auto-selects the newest .txt file from inputs\lyrics.
+    [string]$LyricsFileName = "",
 
-    # Optional. If omitted, runner auto-selects seed images from inputs\seed images by label.
+    # Optional override. If omitted, runner auto-selects seed images from inputs\seed images by scene label.
     [string]$SeedImageFileName = "",
 
     [string]$RunnerCommand = "",
@@ -29,6 +30,8 @@ $ErrorActionPreference = "Stop"
 
 $RepoPath = "C:\Users\Tt-rexX\Documents\GitHub\Audio-Analyze"
 $VenvActivate = Join-Path $RepoPath ".venv\Scripts\Activate.ps1"
+$AudioDir = Join-Path $RepoPath "inputs\audio"
+$LyricsDir = Join-Path $RepoPath "inputs\lyrics"
 $SeedImagesDir = Join-Path $RepoPath "inputs\seed images"
 
 Set-Location $RepoPath
@@ -39,26 +42,58 @@ if (!(Test-Path $VenvActivate)) {
 
 . $VenvActivate
 
-$AudioPath = Join-Path $RepoPath ("inputs\audio\" + $AudioFileName)
-$LyricsPath = Join-Path $RepoPath ("inputs\lyrics\" + $LyricsFileName)
-
-if (!(Test-Path $AudioPath)) {
-    throw "Missing audio file. Put it here: inputs\audio\$AudioFileName"
+if (!(Test-Path $AudioDir)) {
+    throw "Missing audio input folder. Create it here: inputs\audio"
 }
 
-if (!(Test-Path $LyricsPath)) {
-    throw "Missing lyrics text file. Put it here: inputs\lyrics\$LyricsFileName"
-}
-
-if ($LyricsPath -notmatch "\.txt$") {
-    throw "Lyrics file must be .txt format. Current file: $LyricsPath"
+if (!(Test-Path $LyricsDir)) {
+    throw "Missing lyrics input folder. Create it here: inputs\lyrics"
 }
 
 if (!(Test-Path $SeedImagesDir)) {
     throw "Missing seed image folder. Create it here: inputs\seed images"
 }
 
+$AllowedAudioExt = @(".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg")
 $AllowedImageExt = @(".png", ".jpg", ".jpeg", ".webp")
+
+if ($AudioFileName.Trim().Length -gt 0) {
+    $AudioPath = Join-Path $AudioDir $AudioFileName
+    if (!(Test-Path $AudioPath)) {
+        throw "Missing audio file. Put it here: inputs\audio\$AudioFileName"
+    }
+    $AudioFile = Get-Item $AudioPath
+}
+else {
+    $AudioFiles = Get-ChildItem -Path $AudioDir -File | Where-Object { $AllowedAudioExt -contains $_.Extension.ToLower() } | Sort-Object LastWriteTime -Descending
+    if ($AudioFiles.Count -lt 1) {
+        throw "No supported audio files found in inputs\audio. Supported: $($AllowedAudioExt -join ', ')"
+    }
+    $AudioFile = $AudioFiles[0]
+}
+
+if ($LyricsFileName.Trim().Length -gt 0) {
+    $LyricsPath = Join-Path $LyricsDir $LyricsFileName
+    if (!(Test-Path $LyricsPath)) {
+        throw "Missing lyrics text file. Put it here: inputs\lyrics\$LyricsFileName"
+    }
+    $LyricsFile = Get-Item $LyricsPath
+}
+else {
+    $LyricsFiles = Get-ChildItem -Path $LyricsDir -File -Filter *.txt | Sort-Object LastWriteTime -Descending
+    if ($LyricsFiles.Count -lt 1) {
+        throw "No .txt lyric files found in inputs\lyrics. Lyrics must be plain .txt format."
+    }
+    $LyricsFile = $LyricsFiles[0]
+}
+
+$AudioPath = $AudioFile.FullName
+$LyricsPath = $LyricsFile.FullName
+
+if ($LyricsPath -notmatch "\.txt$") {
+    throw "Lyrics file must be .txt format. Current file: $LyricsPath"
+}
+
 $SeedFiles = Get-ChildItem -Path $SeedImagesDir -File | Where-Object { $AllowedImageExt -contains $_.Extension.ToLower() } | Sort-Object Name
 
 if ($SeedFiles.Count -lt 1) {
@@ -107,8 +142,10 @@ $InjectedPlanPath = Join-Path $RunRoot ($RunName + "_plan_ASMO_INJECTED.json")
 New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
 
 Write-Host "== Real-input ASMO/LTX runner =="
-Write-Host "Audio:         $AudioPath"
-Write-Host "Lyrics:        $LyricsPath"
+Write-Host "AudioDir:      $AudioDir"
+Write-Host "SelectedAudio: $AudioPath"
+Write-Host "LyricsDir:     $LyricsDir"
+Write-Host "SelectedLyrics:$LyricsPath"
 Write-Host "SeedImagesDir: $SeedImagesDir"
 Write-Host "Seed count:    $($SeedFiles.Count)"
 Write-Host "RunRoot:       $RunRoot"
