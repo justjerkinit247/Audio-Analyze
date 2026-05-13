@@ -17,6 +17,7 @@ param(
     # Default 0 means auto-match scene count to detected seed image count.
     [int]$SceneCount = 0,
     [double]$SceneSeconds = 8.0,
+    [double]$StartOffsetSeconds = 0.0,
     [int]$MaxEventsPerScene = 8,
     [string]$Resolution = "1080x1920",
     [int]$PromptMaxChars = 5000,
@@ -105,21 +106,23 @@ $MaximizedPlanPath = Join-Path $RunRoot ($RunName + "_plan_ASMO_INJECTED_MAXIMIZ
 New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
 
 Write-Host "== Real-input ASMO/LTX runner =="
-Write-Host "AudioDir:          $AudioDir"
-Write-Host "SelectedAudio:     $AudioPath"
-Write-Host "LyricsDir:         $LyricsDir"
-Write-Host "SelectedLyrics:    $LyricsPath"
-Write-Host "SeedImagesDir:     $SeedImagesDir"
-Write-Host "Seed count:        $($SeedFiles.Count)"
-Write-Host "Scene count:       $SceneCount ($SceneCountSource)"
-Write-Host "Resolution:        $Resolution"
-Write-Host "Prompt target:     $PromptTargetChars / $PromptMaxChars chars"
-Write-Host "RunRoot:           $RunRoot"
+Write-Host "AudioDir:             $AudioDir"
+Write-Host "SelectedAudio:        $AudioPath"
+Write-Host "LyricsDir:            $LyricsDir"
+Write-Host "SelectedLyrics:       $LyricsPath"
+Write-Host "SeedImagesDir:        $SeedImagesDir"
+Write-Host "Seed count:           $($SeedFiles.Count)"
+Write-Host "Scene count:          $SceneCount ($SceneCountSource)"
+Write-Host "Scene seconds:        $SceneSeconds"
+Write-Host "Start offset seconds: $StartOffsetSeconds"
+Write-Host "Resolution:           $Resolution"
+Write-Host "Prompt target:        $PromptTargetChars / $PromptMaxChars chars"
+Write-Host "RunRoot:              $RunRoot"
 
 $results = @()
 for ($i = 1; $i -le $SceneCount; $i++) {
-    $start = [math]::Round(($i - 1) * $SceneSeconds, 3)
-    $end = [math]::Round($i * $SceneSeconds, 3)
+    $start = [math]::Round($StartOffsetSeconds + (($i - 1) * $SceneSeconds), 3)
+    $end = [math]::Round($StartOffsetSeconds + ($i * $SceneSeconds), 3)
     $SeedImagePath = Get-SeedForScene -SceneNumber $i -AvailableSeeds $SeedFiles
     $sceneType = "performance phrase"
     if ($i -eq 1) { $sceneType = "intro phrase" }
@@ -134,6 +137,7 @@ for ($i = 1; $i -le $SceneCount; $i++) {
             end = $end
             duration = $SceneSeconds
             duration_seconds = $SceneSeconds
+            start_offset_seconds = $StartOffsetSeconds
             scene_type = $sceneType
         }
         source_audio_path = $AudioPath
@@ -157,6 +161,7 @@ $plan = [ordered]@{
     scene_count = $SceneCount
     scene_count_source = $SceneCountSource
     scene_seconds = $SceneSeconds
+    start_offset_seconds = $StartOffsetSeconds
     resolution = $Resolution
     results = $results
 }
@@ -168,10 +173,10 @@ Write-Host $PlanPath
 
 Write-Host ""
 Write-Host "== Injecting ASMO from real .txt lyrics + real audio =="
-python -c "from pathlib import Path; from src.audio_analyze.asmo_engine.ltx_run_integrator import inject_asmo_into_ltx_run_plan; inject_asmo_into_ltx_run_plan(Path(r'$PlanPath'), Path(r'$LyricsPath'), Path(r'$InjectedPlanPath'), max_events_per_scene=$MaxEventsPerScene); print(r'$InjectedPlanPath')"
+python -c "from pathlib import Path; from src.audio_analyze.asmo_engine.ltx_run_integrator import inject_asmo_into_ltx_run_plan; inject_asmo_into_ltx_run_plan(Path(r'$PlanPath'), Path(r'$LyricsPath'), Path(r'$InjectedPlanPath'), max_events_per_scene=$MaxEventsPerScene, start_offset_seconds=$StartOffsetSeconds); print(r'$InjectedPlanPath')"
 if (!(Test-Path $InjectedPlanPath)) { throw "ASMO injected plan was not created: $InjectedPlanPath" }
 
-python -c "import json; from pathlib import Path; p=Path(r'$InjectedPlanPath'); data=json.loads(p.read_text(encoding='utf-8-sig')); data['source_audio_path']=r'$AudioPath'; data['lyrics_path']=r'$LyricsPath'; data['seed_images_dir']=r'$SeedImagesDir'; data['seed_image_count']=$($SeedFiles.Count); data['scene_count']=$SceneCount; data['scene_count_source']=r'$SceneCountSource'; data['resolution']=r'$Resolution'; results=data.get('results', []); [item.update({'file_stem': item.get('file_stem') or r'$RunName', 'resolution': item.get('resolution') or r'$Resolution'}) for item in results if isinstance(item, dict)]; [item.setdefault('scene', {}).update({'duration': item.get('scene', {}).get('duration') or item.get('scene', {}).get('duration_seconds') or $SceneSeconds}) for item in results if isinstance(item, dict)]; p.write_text(json.dumps(data, indent=2), encoding='utf-8'); print('Patched LTX-compatible metadata into:', p)"
+python -c "import json; from pathlib import Path; p=Path(r'$InjectedPlanPath'); data=json.loads(p.read_text(encoding='utf-8-sig')); data['source_audio_path']=r'$AudioPath'; data['lyrics_path']=r'$LyricsPath'; data['seed_images_dir']=r'$SeedImagesDir'; data['seed_image_count']=$($SeedFiles.Count); data['scene_count']=$SceneCount; data['scene_count_source']=r'$SceneCountSource'; data['scene_seconds']=$SceneSeconds; data['start_offset_seconds']=$StartOffsetSeconds; data['resolution']=r'$Resolution'; results=data.get('results', []); [item.update({'file_stem': item.get('file_stem') or r'$RunName', 'resolution': item.get('resolution') or r'$Resolution'}) for item in results if isinstance(item, dict)]; [item.setdefault('scene', {}).update({'duration': item.get('scene', {}).get('duration') or item.get('scene', {}).get('duration_seconds') or $SceneSeconds, 'start_offset_seconds': $StartOffsetSeconds}) for item in results if isinstance(item, dict)]; p.write_text(json.dumps(data, indent=2), encoding='utf-8'); print('Patched LTX-compatible metadata into:', p)"
 
 Write-Host ""
 Write-Host "== Expanding per-scene LTX scripts under 5000 chars =="
