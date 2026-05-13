@@ -15,6 +15,29 @@ def write_json(path: str | Path, data: Any) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def build_ltx_motion_directive_block(
+    events: list[dict[str, Any]],
+    start_ms: int = 0,
+) -> str:
+    """Build a prompt-safe timed ASMO directive block for LTX scene prompts."""
+    lines = ["TIMED ASMO MOTION DIRECTIVES:"]
+
+    for event in events:
+        absolute_ms = int(event.get("timestamp_ms", 0))
+        relative_ms = max(0, absolute_ms - int(start_ms))
+        seconds = relative_ms / 1000.0
+        lyric = str(event.get("lyric", "")).strip()
+        directive = event.get("motion_directive", {}) or {}
+        motion = directive.get("prompt_fragment") or "sync movement tightly to lyric and beat"
+        camera = directive.get("camera_behavior") or "steady_tracking"
+
+        lines.append(
+            f"- +{seconds:0.3f}s: {motion}; camera={camera}; lyric='{lyric}'"
+        )
+
+    return "\n".join(lines)
+
+
 def inject_asmo_timeline_into_ltx_plan(
     plan_json: str | Path,
     asmo_timeline_json: str | Path,
@@ -27,17 +50,8 @@ def inject_asmo_timeline_into_ltx_plan(
 
     for item in plan.get("results", []):
         base_prompt = item.get("prompt_text", "").strip()
-
-        lines = [
-            "TIMED ASMO MOTION DIRECTIVES:",
-        ]
-
-        for event in events[:8]:
-            lines.append(
-                f"- {event.get('timecode')}: sync movement to lyric '{event.get('lyric')}'"
-            )
-
-        item["prompt_text"] = f"{base_prompt}\n\n" + "\n".join(lines)
+        block = build_ltx_motion_directive_block(events[:8], start_ms=0)
+        item["prompt_text"] = f"{base_prompt}\n\n{block}".strip()
         item["asmo_motion_event_count"] = len(events[:8])
 
     plan["asmo_timeline_injected"] = True
