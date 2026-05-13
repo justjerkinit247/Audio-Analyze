@@ -11,6 +11,8 @@ DEFAULT_TRIM_TAIL_SECONDS = 0.08
 DEFAULT_TRANSITION_SECONDS = 0.0
 DEFAULT_AUDIO_OFFSET_SECONDS = 0.0
 DEFAULT_MIN_PAD_SECONDS = 0.01
+DEFAULT_TIMING_SOURCE = "result-json"
+DEFAULT_AUDIO_MODE = "scene-json"
 
 
 def scene_number_from_path(path):
@@ -39,6 +41,12 @@ def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
+def write_json(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def collect_mp4s(downloads_dir):
     downloads_dir = Path(downloads_dir)
     if not downloads_dir.exists():
@@ -49,13 +57,25 @@ def collect_mp4s(downloads_dir):
     return clips
 
 
-def select_latest_scene_clips(clip_paths, expected_scenes=None, strict_scenes=False):
-    """
-    Select exactly one clip per scene number.
+def collect_result_jsons(results_dir):
+    if not results_dir:
+        return {}
+    results_dir = Path(results_dir)
+    if not results_dir.exists():
+        return {}
+    result_map = {}
+    for path in sorted(results_dir.glob("scene_*_result.json"), key=natural_scene_key):
+        scene_number = scene_number_from_path(path)
+        if scene_number is None:
+            continue
+        try:
+            result_map[scene_number] = read_json(path)
+        except Exception:
+            continue
+    return result_map
 
-    If duplicates exist, choose the newest file for that scene. This prevents old failed
-    or earlier-generation clips from silently entering the assembly.
-    """
+
+def select_latest_scene_clips(clip_paths, expected_scenes=None, strict_scenes=False):
     by_scene = {}
     unnumbered = []
 
@@ -107,7 +127,10 @@ def select_latest_scene_clips(clip_paths, expected_scenes=None, strict_scenes=Fa
 def load_plan(plan_json):
     if not plan_json:
         return None
-    return read_json(plan_json)
+    path = Path(plan_json)
+    if not path.exists():
+        return None
+    return read_json(path)
 
 
 def load_source_audio(plan_json):
@@ -117,7 +140,7 @@ def load_source_audio(plan_json):
     results = plan.get("results") or []
     if not results:
         return None
-    audio_path = results[0].get("source_audio_path")
+    audio_path = results[0].get("source_audio_path") or plan.get("source_audio_path")
     return Path(audio_path) if audio_path else None
 
 
@@ -131,20 +154,64 @@ def load_expected_scene_count(plan_json):
     return len(results) or None
 
 
-def load_scene_durations(plan_json):
+def plan_items_by_scene(plan_json):
     plan = load_plan(plan_json)
     if not plan:
         return {}
-    durations = {}
+    items = {}
     for item in plan.get("results", []):
         clip_index = item.get("clip_index")
-        scene = item.get("scene", {})
-        if clip_index is None:
-            continue
-        duration = scene.get("duration")
-        if duration is not None:
-            durations[int(clip_index)] = float(duration)
-    return durations
+        if clip_index is not None:
+            items[int(clip_index)] = item
+    return items
+
+
+def scene_duration_from_metadata(scene_number, plan_items, result_items, timing_source):
+    result = result_items.get(scene_number) or {}
+    plan_item = plan_items.get(scene_number) or {}
+
+    if timing_source == "clip":
+        return None, "clip"
+
+    sources = []
+    if timing_source in {"result-json", "auto"}:
+        sources.append(("result-json", result))
+        sources.append(("plan-json", plan_item))
+    elif timing_source == "plan-json":
+        sources.append(("plan-json", plan_item))
+        sources.append(("result-json", result))
+    else:
+        raise ValueError(f"Unsupported timing source: {timing_source}")
+
+    for source_name, item in sources:
+        scene = item.get("scene") or {}
+        for key in ("duration", "duration_seconds"):
+            value = scene.get(key)
+            if value is not None:
+                try:
+                    value = float(value)
+                    if value > 0:
+                        return value, source_name
+                except Exception:
+                    pass
+        start = scene.get("start")
+        end = scene.get("end")
+        try:
+            if start is not None and end is not None:
+                duration = float(end) - float(start)
+                if duration > 0:
+                    return duration, source_name
+        except Exception:
+            pass
+    return None, None
+
+
+def scene_audio_from_result(scene_number, result_items):
+    result = result_items.get(scene_number) or {}
+    scene_audio = result.get("scene_audio_path")
+    if scene_audio and Path(scene_audio).exists():
+        return Path(scene_audio)
+    return None
 
 
 def trim_clip_tail(clip, trim_tail_seconds):
@@ -157,6 +224,8 @@ def trim_clip_tail(clip, trim_tail_seconds):
 
 
 def pad_clip_to_duration(clip, target_duration, fps=24, min_pad_seconds=DEFAULT_MIN_PAD_SECONDS):
+    if target_duration is None:
+        return clip, 0.0
     target_duration = float(target_duration)
     if target_duration <= 0:
         return clip, 0.0
@@ -174,24 +243,19 @@ def pad_clip_to_duration(clip, target_duration, fps=24, min_pad_seconds=DEFAULT_
     return padded, delta
 
 
-def normalize_clip_to_plan_duration(clip, scene_number, scene_durations, preserve_plan_timing, fps=24):
-    if not preserve_plan_timing:
-        return clip, None, 0.0
-    target_duration = scene_durations.get(scene_number)
-    if target_duration is None:
-        return clip, None, 0.0
-    normalized, pad_delta = pad_clip_to_duration(clip, target_duration, fps=fps)
-    return normalized, target_duration, pad_delta
+def attach_scene_audio(clip, scene_number, result_items, audio_mode):
+    if audio_mode != "scene-json":
+        return clip, None
+    scene_audio = scene_audio_from_result(scene_number, result_items)
+    if not scene_audio:
+        return clip, None
+    audio_clip = AudioFileClip(str(scene_audio))
+    target_duration = min(float(clip.duration), float(audio_clip.duration))
+    video = clip.subclipped(0, target_duration).with_audio(audio_clip.subclipped(0, target_duration))
+    return video, audio_clip
 
 
 def add_crossfades(clips, transition_seconds):
-    """
-    Add soft visual crossfades when the installed MoviePy version supports them.
-
-    The assembler remains safe if crossfade support is unavailable: it raises a clear
-    error instead of silently producing an unexpected edit. Use --transition-seconds 0
-    for hard cuts with tail trimming only.
-    """
     transition_seconds = max(0.0, float(transition_seconds or 0.0))
     if transition_seconds <= 0 or len(clips) <= 1:
         return clips, 0.0
@@ -207,19 +271,13 @@ def add_crossfades(clips, transition_seconds):
             except Exception as exc:
                 raise RuntimeError(
                     "This MoviePy install does not expose crossfade support. "
-                    "Rerun with --transition-seconds 0 and use --trim-tail-seconds 0.08 for cleanup. "
+                    "Rerun with --transition-seconds 0. "
                     f"Original error: {exc}"
                 )
     return faded, -transition_seconds
 
 
 def apply_audio_offset(audio_full, final_duration, start_seconds, audio_offset_seconds):
-    """
-    Apply audio sync offset.
-
-    Positive offset delays the song under the video by adding silence before the audio.
-    Negative offset starts the song later by skipping ahead in the source audio.
-    """
     audio_offset_seconds = float(audio_offset_seconds or 0.0)
     start_seconds = float(start_seconds or 0.0)
 
@@ -240,11 +298,31 @@ def apply_audio_offset(audio_full, final_duration, start_seconds, audio_offset_s
     return audio_full.subclipped(source_start, source_start + final_duration)
 
 
-def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, start_seconds=0.0, duration_seconds=None, fps=24, trim_tail_seconds=DEFAULT_TRIM_TAIL_SECONDS, transition_seconds=DEFAULT_TRANSITION_SECONDS, audio_offset_seconds=DEFAULT_AUDIO_OFFSET_SECONDS, expected_scenes=None, strict_scenes=False, report_json=None, preserve_plan_timing=True):
+def merge_clips(
+    downloads_dir,
+    output_path,
+    plan_json=None,
+    results_dir=None,
+    audio_path=None,
+    start_seconds=0.0,
+    duration_seconds=None,
+    fps=24,
+    trim_tail_seconds=DEFAULT_TRIM_TAIL_SECONDS,
+    transition_seconds=DEFAULT_TRANSITION_SECONDS,
+    audio_offset_seconds=DEFAULT_AUDIO_OFFSET_SECONDS,
+    expected_scenes=None,
+    strict_scenes=False,
+    report_json=None,
+    timing_source=DEFAULT_TIMING_SOURCE,
+    audio_mode=DEFAULT_AUDIO_MODE,
+):
     all_clip_paths = collect_mp4s(downloads_dir)
     if expected_scenes is None:
         expected_scenes = load_expected_scene_count(plan_json)
-    scene_durations = load_scene_durations(plan_json) if preserve_plan_timing else {}
+
+    plan_items = plan_items_by_scene(plan_json)
+    result_items = collect_result_jsons(results_dir or Path(downloads_dir).parent)
+
     selection = select_latest_scene_clips(all_clip_paths, expected_scenes=expected_scenes, strict_scenes=strict_scenes)
     clip_paths = selection["selected"]
     if not clip_paths:
@@ -255,27 +333,34 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
 
     raw_clips = [VideoFileClip(str(path)) for path in clip_paths]
     processed_clips = []
+    scene_audio_clips = []
     raw_clip_info = []
 
     for path, clip in zip(clip_paths, raw_clips):
         scene_number = scene_number_from_path(path)
         trimmed = trim_clip_tail(clip, trim_tail_seconds)
-        normalized, target_duration, pad_delta = normalize_clip_to_plan_duration(
-            trimmed,
+        target_duration, duration_source = scene_duration_from_metadata(
             scene_number,
-            scene_durations,
-            preserve_plan_timing=preserve_plan_timing,
-            fps=fps,
+            plan_items=plan_items,
+            result_items=result_items,
+            timing_source=timing_source,
         )
-        processed_clips.append(normalized)
+        normalized, pad_delta = pad_clip_to_duration(trimmed, target_duration, fps=fps)
+        with_scene_audio, scene_audio_clip = attach_scene_audio(normalized, scene_number, result_items, audio_mode)
+        if scene_audio_clip:
+            scene_audio_clips.append(scene_audio_clip)
+        processed_clips.append(with_scene_audio)
         raw_clip_info.append({
             "scene": scene_number,
             "path": str(path.resolve()),
             "raw_duration": round(float(clip.duration), 3),
             "trimmed_duration": round(float(trimmed.duration), 3),
-            "target_plan_duration": round(float(target_duration), 3) if target_duration is not None else None,
+            "target_duration": round(float(target_duration), 3) if target_duration is not None else None,
+            "target_duration_source": duration_source,
             "duration_adjustment": round(float(pad_delta), 3),
-            "final_scene_duration": round(float(normalized.duration), 3),
+            "final_scene_duration": round(float(with_scene_audio.duration), 3),
+            "scene_audio_path": str(scene_audio_from_result(scene_number, result_items).resolve()) if scene_audio_from_result(scene_number, result_items) else None,
+            "audio_mode": audio_mode,
         })
 
     video_clips, padding = add_crossfades(processed_clips, transition_seconds)
@@ -283,15 +368,15 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
 
     audio_source = Path(audio_path) if audio_path else load_source_audio(plan_json)
     audio_full = None
-    audio_clip = None
+    full_audio_clip = None
 
-    if audio_source and audio_source.exists():
+    if audio_mode == "full-bed" and audio_source and audio_source.exists():
         audio_full = AudioFileClip(str(audio_source))
         final_duration = duration_seconds if duration_seconds is not None else min(final_video.duration, audio_full.duration - max(start_seconds, 0.0))
         if final_duration <= 0:
             raise ValueError("Computed final audio duration is not valid.")
-        audio_clip = apply_audio_offset(audio_full, final_duration, start_seconds, audio_offset_seconds)
-        final_video = final_video.subclipped(0, min(final_video.duration, final_duration)).with_audio(audio_clip)
+        full_audio_clip = apply_audio_offset(audio_full, final_duration, start_seconds, audio_offset_seconds)
+        final_video = final_video.subclipped(0, min(final_video.duration, final_duration)).with_audio(full_audio_clip)
     elif duration_seconds is not None:
         final_video = final_video.subclipped(0, min(final_video.duration, duration_seconds))
 
@@ -315,20 +400,20 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
         "clips": [str(path.resolve()) for path in clip_paths],
         "clip_info": raw_clip_info,
         "audio_source": str(audio_source.resolve()) if audio_source and audio_source.exists() else None,
+        "audio_mode": audio_mode,
+        "timing_source": timing_source,
+        "results_dir": str(Path(results_dir or Path(downloads_dir).parent).resolve()),
         "start_seconds": start_seconds,
         "audio_offset_seconds": audio_offset_seconds,
         "duration_seconds": duration_seconds,
         "trim_tail_seconds": trim_tail_seconds,
-        "preserve_plan_timing": preserve_plan_timing,
         "transition_seconds": transition_seconds,
         "transition_padding": padding,
         "final_video_duration": round(float(final_video.duration), 3) if final_video else None,
     }
 
     if report_json:
-        report_path = Path(report_json)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
+        write_json(report_json, info)
 
     for clip in raw_clips:
         clip.close()
@@ -338,8 +423,13 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
                 clip.close()
             except Exception:
                 pass
-    if audio_clip:
-        audio_clip.close()
+    for audio_clip in scene_audio_clips:
+        try:
+            audio_clip.close()
+        except Exception:
+            pass
+    if full_audio_clip:
+        full_audio_clip.close()
     if audio_full:
         audio_full.close()
     final_video.close()
@@ -350,24 +440,26 @@ def merge_clips(downloads_dir, output_path, plan_json=None, audio_path=None, sta
 def main():
     parser = argparse.ArgumentParser(description="Merge downloaded LTX scene clips into one MP4.")
     parser.add_argument("--downloads", default="outputs\\ltx_video_run\\downloads")
+    parser.add_argument("--results-dir", default=None, help="Folder containing scene_XX_result.json files. Defaults to parent of downloads folder.")
     parser.add_argument("--output", default="outputs\\ltx_video_run\\assembled\\holy_cheeks_ltx_assembled.mp4")
     parser.add_argument("--plan-json", default="outputs\\ltx_video_run\\holy_cheeks_ltx_plan.json")
     parser.add_argument("--audio", default=None)
     parser.add_argument("--start-seconds", type=float, default=0.0)
-    parser.add_argument("--audio-offset-seconds", type=float, default=DEFAULT_AUDIO_OFFSET_SECONDS, help="Positive delays audio under video; negative starts audio later.")
+    parser.add_argument("--audio-offset-seconds", type=float, default=DEFAULT_AUDIO_OFFSET_SECONDS)
     parser.add_argument("--duration-seconds", type=float, default=None)
     parser.add_argument("--fps", type=int, default=24)
-    parser.add_argument("--trim-tail-seconds", type=float, default=DEFAULT_TRIM_TAIL_SECONDS, help="Trim this much from the end of each clip before assembly to remove damaged terminal frames.")
-    parser.add_argument("--transition-seconds", type=float, default=DEFAULT_TRANSITION_SECONDS, help="Optional visual crossfade duration between clips. Use 0 for hard cuts.")
-    parser.add_argument("--expected-scenes", type=int, default=None, help="Expected number of scene clips. Defaults to scene_count from the plan JSON.")
-    parser.add_argument("--strict-scenes", action="store_true", help="Fail if any expected scene clip is missing.")
+    parser.add_argument("--trim-tail-seconds", type=float, default=DEFAULT_TRIM_TAIL_SECONDS)
+    parser.add_argument("--transition-seconds", type=float, default=DEFAULT_TRANSITION_SECONDS)
+    parser.add_argument("--expected-scenes", type=int, default=None)
+    parser.add_argument("--strict-scenes", action="store_true")
     parser.add_argument("--report-json", default="outputs\\ltx_video_run\\assembled\\assembly_report.json")
-    parser.add_argument("--preserve-plan-timing", action="store_true", default=True, help="Trim damaged tails, then pad/clip each scene back to its planned duration from the plan JSON. Enabled by default.")
-    parser.add_argument("--no-preserve-plan-timing", action="store_false", dest="preserve_plan_timing", help="Disable plan-duration preservation and assemble using actual processed clip durations.")
+    parser.add_argument("--timing-source", choices=["result-json", "plan-json", "clip", "auto"], default=DEFAULT_TIMING_SOURCE)
+    parser.add_argument("--audio-mode", choices=["scene-json", "full-bed", "none"], default=DEFAULT_AUDIO_MODE)
     args = parser.parse_args()
 
     info = merge_clips(
         downloads_dir=args.downloads,
+        results_dir=args.results_dir,
         output_path=args.output,
         plan_json=args.plan_json,
         audio_path=args.audio,
@@ -380,7 +472,8 @@ def main():
         expected_scenes=args.expected_scenes,
         strict_scenes=args.strict_scenes,
         report_json=args.report_json,
-        preserve_plan_timing=args.preserve_plan_timing,
+        timing_source=args.timing_source,
+        audio_mode=args.audio_mode,
     )
 
     print("LTX clip assembly complete.")
