@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from src.audio_analyze.asmo_engine.asmo_engine import ASMOEngine
 
 
@@ -16,5 +14,15 @@ def test_asmo_generates_motion_timeline(tmp_path):
         lyric_path=lyrics,
     )
 
-    assert timeline["schema"] == "asmo.motion_timeline.v1"
+    assert timeline["schema"] == "asmo.motion_timeline.v2"
     assert len(timeline["events"]) >= 2
+    assert timeline["audio_fingerprint"] is None
+
+    first_event = timeline["events"][0]
+
+    assert "motion_directive" in first_event
+    assert "beat_lock" in first_event
+    assert "motion_vector" in first_event
+    assert "camera_state" in first_event
+
+    assert first_event["motion_directive"]["movement_type"] == "raise_arms"
