@@ -23,7 +23,10 @@ param(
 
     [double]$SceneSeconds = 8.0,
 
-    [int]$MaxEventsPerScene = 8
+    [int]$MaxEventsPerScene = 8,
+
+    # LTX runner expects normalized resolution values, not aspect ratio shorthand.
+    [string]$Resolution = "1080x1920"
 )
 
 $ErrorActionPreference = "Stop"
@@ -148,6 +151,7 @@ Write-Host "LyricsDir:     $LyricsDir"
 Write-Host "SelectedLyrics:$LyricsPath"
 Write-Host "SeedImagesDir: $SeedImagesDir"
 Write-Host "Seed count:    $($SeedFiles.Count)"
+Write-Host "Resolution:    $Resolution"
 Write-Host "RunRoot:       $RunRoot"
 
 $results = @()
@@ -163,10 +167,12 @@ for ($i = 1; $i -le $SceneCount; $i++) {
 
     $results += [ordered]@{
         clip_index = $i
+        file_stem = $RunName
         scene = [ordered]@{
             scene_index = $i
             start = $start
             end = $end
+            duration = $SceneSeconds
             duration_seconds = $SceneSeconds
             scene_type = $sceneType
         }
@@ -174,6 +180,7 @@ for ($i = 1; $i -le $SceneCount; $i++) {
         scene_audio_path = $AudioPath
         seed_image_used = $SeedImagePath
         seed_filename_prompt_hint = [System.IO.Path]::GetFileNameWithoutExtension($SeedImagePath)
+        resolution = $Resolution
         prompt_text = "Image-to-video continuation using the provided seed image. Maintain performer identity, wardrobe, camera continuity, scene continuity, musical timing, and synchronized motion."
         model = "ltx-2-3-pro"
     }
@@ -181,12 +188,14 @@ for ($i = 1; $i -le $SceneCount; $i++) {
 
 $plan = [ordered]@{
     schema = "ltx_run_plan.v1"
+    file_stem = $RunName
     run_name = $RunName
     source_audio_path = $AudioPath
     lyrics_path = $LyricsPath
     seed_images_dir = $SeedImagesDir
     scene_count = $SceneCount
     scene_seconds = $SceneSeconds
+    resolution = $Resolution
     results = $results
 }
 
@@ -205,7 +214,7 @@ if (!(Test-Path $InjectedPlanPath)) {
     throw "ASMO injected plan was not created: $InjectedPlanPath"
 }
 
-python -c "import json; from pathlib import Path; p=Path(r'$InjectedPlanPath'); data=json.loads(p.read_text(encoding='utf-8-sig')); data['source_audio_path']=r'$AudioPath'; data['lyrics_path']=r'$LyricsPath'; data['seed_images_dir']=r'$SeedImagesDir'; p.write_text(json.dumps(data, indent=2), encoding='utf-8'); print('Patched real input metadata into:', p)"
+python -c "import json; from pathlib import Path; p=Path(r'$InjectedPlanPath'); data=json.loads(p.read_text(encoding='utf-8-sig')); data['source_audio_path']=r'$AudioPath'; data['lyrics_path']=r'$LyricsPath'; data['seed_images_dir']=r'$SeedImagesDir'; data['resolution']=r'$Resolution'; results=data.get('results', []); [item.update({'file_stem': item.get('file_stem') or r'$RunName', 'resolution': item.get('resolution') or r'$Resolution'}) for item in results if isinstance(item, dict)]; [item.setdefault('scene', {}).update({'duration': item.get('scene', {}).get('duration') or item.get('scene', {}).get('duration_seconds') or $SceneSeconds}) for item in results if isinstance(item, dict)]; p.write_text(json.dumps(data, indent=2), encoding='utf-8'); print('Patched LTX-compatible metadata into:', p)"
 
 Write-Host ""
 Write-Host "ASMO injected plan ready:"
