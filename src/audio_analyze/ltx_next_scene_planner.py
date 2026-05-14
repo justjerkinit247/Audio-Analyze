@@ -30,6 +30,17 @@ def read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def validate_plan_has_results(plan: dict, plan_json: Path) -> None:
+    if not isinstance(plan, dict):
+        raise ValueError(f"Plan is not a JSON object: {plan_json}")
+    results = plan.get("results")
+    if not isinstance(results, list) or not results:
+        raise ValueError(
+            "Input plan has no scene results. Regenerate the base LTX plan before building a next plan. "
+            f"Plan path: {plan_json}"
+        )
+
+
 def load_memory(state_root: Path) -> dict:
     root = Path(state_root) / "memory"
     return {
@@ -109,11 +120,14 @@ def patch_plan_with_memory(plan: dict, feedback_packet: dict, strategy_scores: d
 
 
 def build_next_plan(plan_json: Path, state_root: Path, output: Path) -> dict:
+    plan_json = Path(plan_json)
     plan = read_json(plan_json, default={}) or {}
+    validate_plan_has_results(plan, plan_json)
     feedback = read_json(Path(state_root) / "active" / "feedback" / "feedback_packet.json", default={}) or {}
     scores = read_json(Path(state_root) / "active" / "feedback" / "strategy_scores.json", default={}) or {}
     memory = load_memory(Path(state_root))
     patched = patch_plan_with_memory(plan, feedback, scores, memory)
+    validate_plan_has_results(patched, output)
     write_json(output, patched)
     return patched
 
