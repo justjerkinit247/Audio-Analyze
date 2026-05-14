@@ -43,8 +43,18 @@ def write_json(path: Path, data) -> Path:
     return path
 
 
+def validate_plan_has_results(plan: dict, plan_json: Path) -> None:
+    if not isinstance(plan, dict):
+        raise ValueError(f"Plan is not a JSON object: {plan_json}")
+    results = plan.get("results")
+    if not isinstance(results, list) or not results:
+        raise ValueError(
+            "Input plan has no scene results. Regenerate the base LTX plan before running the intelligence loop. "
+            f"Plan path: {plan_json}"
+        )
+
+
 def audio_rank(path: Path) -> tuple[int, float, str]:
-    """Rank audio candidates: lossless first, then newest, then name."""
     suffix = path.suffix.lower()
     quality_rank = 0 if suffix in LOSSLESS_EXTENSIONS else 1
     try:
@@ -63,44 +73,28 @@ def discover_audio_files(audio_dir: Path = DEFAULT_AUDIO_DIR) -> list[Path]:
 
 
 def resolve_audio_path(audio: Path | None, plan: dict, audio_dir: Path = DEFAULT_AUDIO_DIR) -> tuple[Path | None, dict]:
-    """Return the best existing audio path plus resolution metadata.
-
-    Priority:
-    1. explicit --audio path if it exists
-    2. first existing source_audio_path in the plan
-    3. top-ranked audio file from --audio-dir / inputs/audio
-
-    The folder scan prefers WAV/FLAC/AIFF over compressed formats and then picks
-    the newest file. This avoids hard-coding one song filename while still making
-    the command simple to run.
-    """
     meta = {"method": None, "requested_audio": str(audio) if audio else None, "audio_dir": str(audio_dir)}
-
     if audio:
         audio = Path(audio)
         if audio.exists():
             meta["method"] = "explicit_audio"
             return audio, meta
         meta["explicit_audio_missing"] = str(audio)
-
     for item in plan.get("results", []) if isinstance(plan, dict) else []:
         candidate = item.get("source_audio_path")
         if candidate and Path(candidate).exists():
             meta["method"] = "plan_source_audio"
             return Path(candidate), meta
-
     candidate = plan.get("source_audio_path") if isinstance(plan, dict) else None
     if candidate and Path(candidate).exists():
         meta["method"] = "plan_root_source_audio"
         return Path(candidate), meta
-
     discovered = discover_audio_files(audio_dir)
     meta["discovered_audio_count"] = len(discovered)
     meta["discovered_audio_files"] = [str(p) for p in discovered[:10]]
     if discovered:
         meta["method"] = "auto_discovered_audio_dir"
         return discovered[0], meta
-
     meta["method"] = "none_found"
     return None, meta
 
@@ -130,6 +124,7 @@ def run_intelligence_loop(
     }
 
     plan = read_json(plan_json, default={}) or {}
+    validate_plan_has_results(plan, plan_json)
 
     resolved_audio, audio_meta = resolve_audio_path(audio, plan, audio_dir=Path(audio_dir))
     summary["audio_resolution"] = audio_meta
@@ -139,53 +134,35 @@ def run_intelligence_loop(
             "path": audio_meta["explicit_audio_missing"],
             "action": audio_meta.get("method"),
         })
-
     if require_audio and not resolved_audio:
-        raise FileNotFoundError(
-            f"No usable audio file found. Explicit audio={audio}; audio_dir={audio_dir}; plan_json={plan_json}"
-        )
-
+        raise FileNotFoundError(f"No usable audio file found. Explicit audio={audio}; audio_dir={audio_dir}; plan_json={plan_json}")
     if resolved_audio:
         audio_report = analyze_beat_grid(resolved_audio)
-        if plan:
-            audio_report["scene_boundary_report"] = score_scene_boundaries(plan, audio_report)
+        audio_report["scene_boundary_report"] = score_scene_boundaries(plan, audio_report)
         audio_out = state_root / "active" / "features" / "audio_analysis_upgrade.json"
         write_json(audio_out, audio_report)
-        summary["steps"].append({
-            "step": "audio_analysis",
-            "input_audio": str(resolved_audio),
-            "selection_method": audio_meta.get("method"),
-            "output": str(audio_out),
-            "beat_confidence": audio_report.get("beat_confidence"),
-        })
+        summary["steps"].append({"step": "audio_analysis", "input_audio": str(resolved_audio), "selection_method": audio_meta.get("method"), "output": str(audio_out), "beat_confidence": audio_report.get("beat_confidence")})
     else:
         summary["steps"].append({"step": "audio_analysis", "status": "skipped_no_audio_found"})
 
     features = extract_from_state(state_root)
     features_out = write_features_jsonl(state_root, features)
     summary["steps"].append({"step": "feature_extraction", "output": str(features_out), "feature_count": len(features)})
-
     visual_report = build_visual_critic_report(state_root, external_critic_json=external_critic_json)
     summary["steps"].append({"step": "visual_critic", "scene_count": visual_report.get("scene_count")})
-
     feedback_packet = build_feedback_packet(state_root)
     summary["steps"].append({"step": "feedback_packet", "scene_count": feedback_packet.get("summary", {}).get("scene_count")})
-
     if update_policy:
         policy = update_policy_from_feedback(state_root, feedback_packet)
         summary["steps"].append({"step": "policy_update", "strategy_count": len(policy.get("strategies", {}))})
-
     strategy_scores = score_strategies(state_root)
     summary["steps"].append({"step": "strategy_scoring", "top_strategy": strategy_scores.get("ranked", [{}])[0].get("name") if strategy_scores.get("ranked") else None})
-
     init_memory_bank(state_root)
     if update_memory:
         memory_summary = update_memory_from_active_state(state_root)
         summary["steps"].append({"step": "memory_bank_update", "winning_patterns": memory_summary.get("winning_patterns"), "failure_patterns": memory_summary.get("failure_patterns")})
-
     next_plan = build_next_plan(plan_json, state_root, output_plan)
     summary["steps"].append({"step": "next_plan", "output": str(output_plan), "scene_count": len(next_plan.get("results", []))})
-
     summary["status"] = "complete"
     loop_summary_path = state_root / "active" / "feedback" / "intelligence_loop_summary.json"
     write_json(loop_summary_path, summary)
@@ -204,7 +181,6 @@ def main():
     parser.add_argument("--no-memory-update", action="store_true")
     parser.add_argument("--require-audio", action="store_true", help="Fail if no explicit, plan-derived, or auto-discovered audio file can be found.")
     args = parser.parse_args()
-
     summary = run_intelligence_loop(
         plan_json=Path(args.plan_json),
         state_root=Path(args.state_root),
