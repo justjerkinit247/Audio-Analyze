@@ -24,6 +24,11 @@ except ImportError:
     from ltx_next_scene_planner import build_next_plan
 
 
+AUDIO_EXTENSIONS = {".wav", ".flac", ".aiff", ".aif", ".mp3", ".ogg", ".m4a", ".aac"}
+LOSSLESS_EXTENSIONS = {".wav", ".flac", ".aiff", ".aif"}
+DEFAULT_AUDIO_DIR = Path("inputs/audio")
+
+
 def read_json(path: Path, default=None):
     path = Path(path)
     if not path.exists():
@@ -38,28 +43,66 @@ def write_json(path: Path, data) -> Path:
     return path
 
 
-def resolve_audio_path(audio: Path | None, plan: dict) -> Path | None:
-    """Return an existing audio path, preferring the explicit CLI value.
+def audio_rank(path: Path) -> tuple[int, float, str]:
+    """Rank audio candidates: lossless first, then newest, then name."""
+    suffix = path.suffix.lower()
+    quality_rank = 0 if suffix in LOSSLESS_EXTENSIONS else 1
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        mtime = 0.0
+    return quality_rank, -mtime, path.name.lower()
 
-    If the explicit path does not exist, fall back to the first source_audio_path
-    stored in the LTX plan. This keeps the intelligence loop useful even when
-    a WAV master has not been placed in inputs/audio yet.
+
+def discover_audio_files(audio_dir: Path = DEFAULT_AUDIO_DIR) -> list[Path]:
+    audio_dir = Path(audio_dir)
+    if not audio_dir.exists():
+        return []
+    candidates = [p for p in audio_dir.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS]
+    return sorted(candidates, key=audio_rank)
+
+
+def resolve_audio_path(audio: Path | None, plan: dict, audio_dir: Path = DEFAULT_AUDIO_DIR) -> tuple[Path | None, dict]:
+    """Return the best existing audio path plus resolution metadata.
+
+    Priority:
+    1. explicit --audio path if it exists
+    2. first existing source_audio_path in the plan
+    3. top-ranked audio file from --audio-dir / inputs/audio
+
+    The folder scan prefers WAV/FLAC/AIFF over compressed formats and then picks
+    the newest file. This avoids hard-coding one song filename while still making
+    the command simple to run.
     """
+    meta = {"method": None, "requested_audio": str(audio) if audio else None, "audio_dir": str(audio_dir)}
+
     if audio:
         audio = Path(audio)
         if audio.exists():
-            return audio
+            meta["method"] = "explicit_audio"
+            return audio, meta
+        meta["explicit_audio_missing"] = str(audio)
 
     for item in plan.get("results", []) if isinstance(plan, dict) else []:
         candidate = item.get("source_audio_path")
         if candidate and Path(candidate).exists():
-            return Path(candidate)
+            meta["method"] = "plan_source_audio"
+            return Path(candidate), meta
 
     candidate = plan.get("source_audio_path") if isinstance(plan, dict) else None
     if candidate and Path(candidate).exists():
-        return Path(candidate)
+        meta["method"] = "plan_root_source_audio"
+        return Path(candidate), meta
 
-    return None
+    discovered = discover_audio_files(audio_dir)
+    meta["discovered_audio_count"] = len(discovered)
+    meta["discovered_audio_files"] = [str(p) for p in discovered[:10]]
+    if discovered:
+        meta["method"] = "auto_discovered_audio_dir"
+        return discovered[0], meta
+
+    meta["method"] = "none_found"
+    return None, meta
 
 
 def run_intelligence_loop(
@@ -67,6 +110,7 @@ def run_intelligence_loop(
     state_root: Path,
     output_plan: Path,
     audio: Path | None = None,
+    audio_dir: Path = DEFAULT_AUDIO_DIR,
     external_critic_json: Path | None = None,
     update_policy: bool = True,
     update_memory: bool = True,
@@ -87,16 +131,19 @@ def run_intelligence_loop(
 
     plan = read_json(plan_json, default={}) or {}
 
-    resolved_audio = resolve_audio_path(audio, plan)
-    if audio and not Path(audio).exists():
+    resolved_audio, audio_meta = resolve_audio_path(audio, plan, audio_dir=Path(audio_dir))
+    summary["audio_resolution"] = audio_meta
+    if audio_meta.get("explicit_audio_missing"):
         summary["warnings"].append({
             "warning": "explicit_audio_path_missing",
-            "path": str(audio),
-            "action": "used_plan_audio_fallback" if resolved_audio else "skipped_audio_analysis",
+            "path": audio_meta["explicit_audio_missing"],
+            "action": audio_meta.get("method"),
         })
 
     if require_audio and not resolved_audio:
-        raise FileNotFoundError(f"No usable audio file found. Explicit audio={audio}; plan_json={plan_json}")
+        raise FileNotFoundError(
+            f"No usable audio file found. Explicit audio={audio}; audio_dir={audio_dir}; plan_json={plan_json}"
+        )
 
     if resolved_audio:
         audio_report = analyze_beat_grid(resolved_audio)
@@ -107,6 +154,7 @@ def run_intelligence_loop(
         summary["steps"].append({
             "step": "audio_analysis",
             "input_audio": str(resolved_audio),
+            "selection_method": audio_meta.get("method"),
             "output": str(audio_out),
             "beat_confidence": audio_report.get("beat_confidence"),
         })
@@ -150,10 +198,11 @@ def main():
     parser.add_argument("--state-root", default="outputs/ltx_video_run/_state")
     parser.add_argument("--output-plan", default="outputs/ltx_video_run/holy_cheeks_ltx_plan_next.json")
     parser.add_argument("--audio", default=None)
+    parser.add_argument("--audio-dir", default=str(DEFAULT_AUDIO_DIR), help="Folder scanned when --audio is omitted or missing.")
     parser.add_argument("--external-critic-json", default=None)
     parser.add_argument("--no-policy-update", action="store_true")
     parser.add_argument("--no-memory-update", action="store_true")
-    parser.add_argument("--require-audio", action="store_true", help="Fail if no explicit or plan-derived audio file can be found.")
+    parser.add_argument("--require-audio", action="store_true", help="Fail if no explicit, plan-derived, or auto-discovered audio file can be found.")
     args = parser.parse_args()
 
     summary = run_intelligence_loop(
@@ -161,6 +210,7 @@ def main():
         state_root=Path(args.state_root),
         output_plan=Path(args.output_plan),
         audio=Path(args.audio) if args.audio else None,
+        audio_dir=Path(args.audio_dir),
         external_critic_json=Path(args.external_critic_json) if args.external_critic_json else None,
         update_policy=not args.no_policy_update,
         update_memory=not args.no_memory_update,
