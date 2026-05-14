@@ -38,6 +38,30 @@ def write_json(path: Path, data) -> Path:
     return path
 
 
+def resolve_audio_path(audio: Path | None, plan: dict) -> Path | None:
+    """Return an existing audio path, preferring the explicit CLI value.
+
+    If the explicit path does not exist, fall back to the first source_audio_path
+    stored in the LTX plan. This keeps the intelligence loop useful even when
+    a WAV master has not been placed in inputs/audio yet.
+    """
+    if audio:
+        audio = Path(audio)
+        if audio.exists():
+            return audio
+
+    for item in plan.get("results", []) if isinstance(plan, dict) else []:
+        candidate = item.get("source_audio_path")
+        if candidate and Path(candidate).exists():
+            return Path(candidate)
+
+    candidate = plan.get("source_audio_path") if isinstance(plan, dict) else None
+    if candidate and Path(candidate).exists():
+        return Path(candidate)
+
+    return None
+
+
 def run_intelligence_loop(
     plan_json: Path,
     state_root: Path,
@@ -46,6 +70,7 @@ def run_intelligence_loop(
     external_critic_json: Path | None = None,
     update_policy: bool = True,
     update_memory: bool = True,
+    require_audio: bool = False,
 ) -> dict:
     plan_json = Path(plan_json)
     state_root = Path(state_root)
@@ -57,17 +82,36 @@ def run_intelligence_loop(
         "state_root": str(state_root),
         "output_plan": str(output_plan),
         "steps": [],
+        "warnings": [],
     }
 
     plan = read_json(plan_json, default={}) or {}
 
-    if audio:
-        audio_report = analyze_beat_grid(Path(audio))
+    resolved_audio = resolve_audio_path(audio, plan)
+    if audio and not Path(audio).exists():
+        summary["warnings"].append({
+            "warning": "explicit_audio_path_missing",
+            "path": str(audio),
+            "action": "used_plan_audio_fallback" if resolved_audio else "skipped_audio_analysis",
+        })
+
+    if require_audio and not resolved_audio:
+        raise FileNotFoundError(f"No usable audio file found. Explicit audio={audio}; plan_json={plan_json}")
+
+    if resolved_audio:
+        audio_report = analyze_beat_grid(resolved_audio)
         if plan:
             audio_report["scene_boundary_report"] = score_scene_boundaries(plan, audio_report)
         audio_out = state_root / "active" / "features" / "audio_analysis_upgrade.json"
         write_json(audio_out, audio_report)
-        summary["steps"].append({"step": "audio_analysis", "output": str(audio_out), "beat_confidence": audio_report.get("beat_confidence")})
+        summary["steps"].append({
+            "step": "audio_analysis",
+            "input_audio": str(resolved_audio),
+            "output": str(audio_out),
+            "beat_confidence": audio_report.get("beat_confidence"),
+        })
+    else:
+        summary["steps"].append({"step": "audio_analysis", "status": "skipped_no_audio_found"})
 
     features = extract_from_state(state_root)
     features_out = write_features_jsonl(state_root, features)
@@ -109,6 +153,7 @@ def main():
     parser.add_argument("--external-critic-json", default=None)
     parser.add_argument("--no-policy-update", action="store_true")
     parser.add_argument("--no-memory-update", action="store_true")
+    parser.add_argument("--require-audio", action="store_true", help="Fail if no explicit or plan-derived audio file can be found.")
     args = parser.parse_args()
 
     summary = run_intelligence_loop(
@@ -119,6 +164,7 @@ def main():
         external_critic_json=Path(args.external_critic_json) if args.external_critic_json else None,
         update_policy=not args.no_policy_update,
         update_memory=not args.no_memory_update,
+        require_audio=args.require_audio,
     )
     print(json.dumps(summary, indent=2))
 
