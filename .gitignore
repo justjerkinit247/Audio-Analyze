@@ -37,3 +37,14 @@ inputs/lip_sync_audio/
 *.jpg
 *.jpeg
 *.webp
+
+# Backup snapshots and local audits
+.asmo_backups/
+local_backups/
+audit/
+MAIN_BRANCH_FULL_RECALL.txt
+
+# Keep generated batch artifacts out of Git
+outputs/batch_run/
+
+# Keep local media inputs out of Git
