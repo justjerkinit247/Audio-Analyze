@@ -37,3 +37,6 @@ inputs/lip_sync_audio/
 *.jpg
 *.jpeg
 *.webp
+
+# Local generated LTX prompt/config files
+inputs/prompts/
