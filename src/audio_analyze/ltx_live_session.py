@@ -23,6 +23,8 @@ def main():
     p_all.add_argument("--model", default="ltx-2-3-pro")
     p_all.add_argument("--guidance-scale", type=float, default=9.0)
     p_all.add_argument("--live", action="store_true")
+    p_all.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    p_all.add_argument("--allow-duplicate-seed-reuse", action="store_true")
 
     p_one = sub.add_parser("submit-one")
     p_one.add_argument("--plan-json", required=True)
@@ -32,6 +34,8 @@ def main():
     p_one.add_argument("--model", default="ltx-2-3-pro")
     p_one.add_argument("--guidance-scale", type=float, default=9.0)
     p_one.add_argument("--live", action="store_true")
+    p_one.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    p_one.add_argument("--allow-duplicate-seed-reuse", action="store_true")
 
     args = parser.parse_args()
 
@@ -44,6 +48,8 @@ def main():
             guidance_scale=args.guidance_scale,
             dry_run=not args.live,
             live=args.live,
+            allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
         )
         copied = ingest_result_folder(Path(args.state_root), Path(args.output_dir))
         update_active_manifest(
@@ -65,6 +71,8 @@ def main():
             guidance_scale=args.guidance_scale,
             dry_run=not args.live,
             live=args.live,
+            allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
         )
         copied = ingest_result_folder(Path(args.state_root), Path(args.output).parent)
         update_active_manifest(

@@ -1,10 +1,18 @@
 from pathlib import Path
 import argparse
+from collections import defaultdict
 import json
 import re
 
+try:
+    from .path_policy import is_windows_absolute_path, resolve_runtime_path, serialize_path
+except ImportError:
+    from path_policy import is_windows_absolute_path, resolve_runtime_path, serialize_path
+
 
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp"}
+EXPLICIT_SEED_METHODS = {"scene_label", "manifest_seed_file"}
+SORTED_FALLBACK_SEED_METHODS = {"sorted_seed_fallback", "existing_plan_seed", "unlabeled_round_robin"}
 PROMPT_MAX_CHARS = 5000
 PROMPT_HINT_MAX_CHARS = 700
 SCENE_PATTERNS = [
@@ -24,11 +32,11 @@ STOP_TOKENS = {
 
 
 def read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    return json.loads(resolve_runtime_path(path).read_text(encoding="utf-8-sig"))
 
 
 def write_json(path, data):
-    path = Path(path)
+    path = resolve_runtime_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -100,7 +108,7 @@ def load_scene_manifest(manifest_path):
 
 
 def collect_labeled_seed_images(seed_dir):
-    seed_dir = Path(seed_dir)
+    seed_dir = resolve_runtime_path(seed_dir)
     if not seed_dir.exists():
         raise FileNotFoundError(f"Seed image folder not found: {seed_dir.resolve()}")
 
@@ -119,14 +127,226 @@ def collect_labeled_seed_images(seed_dir):
     return labeled, unlabeled
 
 
+def expected_scene_mapping_key(clip_index):
+    try:
+        return f"scene_{int(clip_index):02d}"
+    except Exception:
+        return f"scene_{clip_index}"
+
+
+def _seed_problem(clip_index, expected_key, reason, seed_path=None):
+    path_text = f"; seed_image_path={seed_path}" if seed_path else ""
+    return f"Scene {clip_index}: seed_mapping: expected_key={expected_key}; {reason}{path_text}"
+
+
+def _path_key(path):
+    return str(resolve_runtime_path(path).resolve()).lower()
+
+
+def validate_seed_mapping(
+    plan,
+    seed_dir=None,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
+):
+    results = plan.get("results", [])
+    mapping = plan.get("seed_mapping", {})
+    if seed_dir is None:
+        seed_dir = mapping.get("seed_dir")
+
+    report = {
+        "status": "PASSED",
+        "planned_scene_count": len(results),
+        "mapped_scene_count": 0,
+        "allow_sorted_seed_fallback": bool(allow_sorted_seed_fallback),
+        "allow_duplicate_seed_reuse": bool(allow_duplicate_seed_reuse),
+        "fallback_mode_used": False,
+        "missing_mappings": [],
+        "fallback_mappings": [],
+        "duplicate_seed_usage": [],
+        "extra_seed_files": [],
+        "warnings": [],
+        "problems": [],
+    }
+
+    seed_dir_path = resolve_runtime_path(seed_dir) if seed_dir else None
+    labeled = {}
+    all_seed_files = []
+    if seed_dir_path and seed_dir_path.exists():
+        labeled, unlabeled = collect_labeled_seed_images(seed_dir_path)
+        all_seed_files = sorted(
+            [path for paths in labeled.values() for path in paths] + list(unlabeled),
+            key=lambda path: str(path).lower(),
+        )
+
+    mapped_paths = {}
+    mapped_path_to_scenes = defaultdict(list)
+
+    for item in results:
+        clip_index = item.get("clip_index", "unknown")
+        assignment = item.get("seed_assignment") or {}
+        expected_key = assignment.get("scene_label_expected") or expected_scene_mapping_key(clip_index)
+        seed_path_value = item.get("seed_image_used")
+        method = assignment.get("method")
+
+        if not seed_path_value:
+            detail = {
+                "clip_index": clip_index,
+                "expected_key": expected_key,
+                "seed_image_path": seed_path_value,
+                "reason": "missing seed image path",
+            }
+            report["missing_mappings"].append(detail)
+            report["problems"].append(_seed_problem(clip_index, expected_key, detail["reason"], seed_path_value))
+            continue
+
+        try:
+            seed_path = resolve_runtime_path(seed_path_value)
+        except TypeError:
+            detail = {
+                "clip_index": clip_index,
+                "expected_key": expected_key,
+                "seed_image_path": seed_path_value,
+                "reason": "seed image path must be a string",
+            }
+            report["missing_mappings"].append(detail)
+            report["problems"].append(_seed_problem(clip_index, expected_key, detail["reason"], seed_path_value))
+            continue
+
+        seed_path_text = serialize_path(seed_path)
+        seed_path_resolved = str(seed_path.resolve())
+        report["mapped_scene_count"] += 1
+
+        if not assignment:
+            detail = {
+                "clip_index": clip_index,
+                "expected_key": expected_key,
+                "seed_image_path": seed_path_text,
+                "reason": "missing explicit seed_assignment",
+            }
+            report["missing_mappings"].append(detail)
+            report["problems"].append(_seed_problem(clip_index, expected_key, detail["reason"], seed_path_text))
+        elif not method:
+            detail = {
+                "clip_index": clip_index,
+                "expected_key": expected_key,
+                "seed_image_path": seed_path_text,
+                "reason": "seed_assignment.method is required",
+            }
+            report["missing_mappings"].append(detail)
+            report["problems"].append(_seed_problem(clip_index, expected_key, detail["reason"], seed_path_text))
+        elif method in SORTED_FALLBACK_SEED_METHODS:
+            report["fallback_mode_used"] = True
+            detail = {
+                "clip_index": clip_index,
+                "expected_key": expected_key,
+                "seed_image_path": seed_path_text,
+                "method": method,
+                "reason": "sorted-order seed fallback is unsafe unless explicitly allowed",
+            }
+            report["fallback_mappings"].append(detail)
+            if not allow_sorted_seed_fallback:
+                report["problems"].append(_seed_problem(clip_index, expected_key, detail["reason"], seed_path_text))
+        elif method not in EXPLICIT_SEED_METHODS:
+            detail = {
+                "clip_index": clip_index,
+                "expected_key": expected_key,
+                "seed_image_path": seed_path_text,
+                "method": method,
+                "reason": f"unsupported seed mapping method '{method}'",
+            }
+            report["missing_mappings"].append(detail)
+            report["problems"].append(_seed_problem(clip_index, expected_key, detail["reason"], seed_path_text))
+
+        if seed_path.suffix.lower() not in ALLOWED_IMAGES:
+            report["problems"].append(_seed_problem(clip_index, expected_key, f"unsupported image extension '{seed_path.suffix}'", seed_path_text))
+        if not seed_path.exists():
+            report["problems"].append(_seed_problem(clip_index, expected_key, "mapped seed image file missing", seed_path_text))
+        elif seed_path.stat().st_size <= 0:
+            report["problems"].append(_seed_problem(clip_index, expected_key, "mapped seed image file is empty", seed_path_text))
+
+        if method == "scene_label":
+            scene_number = scene_number_from_name(seed_path)
+            try:
+                expected_scene_number = int(clip_index)
+            except Exception:
+                expected_scene_number = None
+            if scene_number != expected_scene_number:
+                report["problems"].append(
+                    _seed_problem(
+                        clip_index,
+                        expected_key,
+                        f"mapped seed filename label resolves to scene {scene_number}, not scene {clip_index}",
+                        seed_path_text,
+                    )
+                )
+
+        key = _path_key(seed_path)
+        mapped_paths[key] = seed_path_text
+        mapped_path_to_scenes[key].append(
+            {
+                "clip_index": clip_index,
+                "expected_key": expected_key,
+                "seed_image_path": seed_path_text,
+                "seed_image_resolved_path": seed_path_resolved,
+            }
+        )
+
+    if seed_dir_path and seed_dir_path.exists():
+        planned_indexes = set()
+        for item in results:
+            try:
+                planned_indexes.add(int(item.get("clip_index")))
+            except Exception:
+                continue
+        for scene_number, paths in sorted(labeled.items()):
+            if scene_number in planned_indexes and len(paths) > 1:
+                expected_key = expected_scene_mapping_key(scene_number)
+                candidates = [serialize_path(path) for path in paths]
+                report["problems"].append(
+                    _seed_problem(
+                        scene_number,
+                        expected_key,
+                        f"multiple seed images match this scene label: {candidates}",
+                    )
+                )
+
+        mapped_keys = set(mapped_paths)
+        for seed_file in all_seed_files:
+            if _path_key(seed_file) not in mapped_keys:
+                extra = serialize_path(seed_file)
+                report["extra_seed_files"].append(extra)
+                report["warnings"].append(f"Seed mapping: extra seed image not mapped: {extra}")
+
+    for scenes in mapped_path_to_scenes.values():
+        if len(scenes) <= 1:
+            continue
+        detail = {
+            "seed_image_path": scenes[0]["seed_image_path"],
+            "clip_indexes": [scene["clip_index"] for scene in scenes],
+            "expected_keys": [scene["expected_key"] for scene in scenes],
+        }
+        report["duplicate_seed_usage"].append(detail)
+        if not allow_duplicate_seed_reuse:
+            report["problems"].append(
+                f"Seed mapping: duplicate seed image usage; clip_indexes={detail['clip_indexes']}; "
+                f"expected_keys={detail['expected_keys']}; seed_image_path={detail['seed_image_path']}"
+            )
+
+    if report["problems"]:
+        report["status"] = "FAILED"
+    return report
+
+
 def choose_manifest_seed(seed_dir, manifest_entry):
     requested = (manifest_entry or {}).get("seed_file")
     if not requested:
         return None
+    seed_dir = resolve_runtime_path(seed_dir)
     candidate = Path(requested)
-    if candidate.is_absolute() and candidate.exists():
+    if (candidate.is_absolute() or is_windows_absolute_path(requested)) and candidate.exists():
         return candidate
-    candidate = Path(seed_dir) / requested
+    candidate = seed_dir / requested
     if candidate.exists():
         return candidate
     return None
@@ -198,7 +418,17 @@ def make_preview_report(plan, output_path):
     Path(output_path).write_text("\n".join(lines), encoding="utf-8")
 
 
-def apply_seed_mapping(plan_json, seed_dir, output_json=None, strict=False, manifest_json=None, no_filename_hints=False, preview_md=None):
+def apply_seed_mapping(
+    plan_json,
+    seed_dir,
+    output_json=None,
+    strict=False,
+    manifest_json=None,
+    no_filename_hints=False,
+    preview_md=None,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
+):
     plan = read_json(plan_json)
     labeled, unlabeled = collect_labeled_seed_images(seed_dir)
     manifest = load_scene_manifest(manifest_json)
@@ -242,7 +472,7 @@ def apply_seed_mapping(plan_json, seed_dir, output_json=None, strict=False, mani
             scene_addon = build_scene_addon(seed_hint, manifest_entry, use_filename_hints=not no_filename_hints)
             if "base_prompt_text" not in item:
                 item["base_prompt_text"] = item.get("prompt_text", "")
-            item["seed_image_used"] = str(Path(chosen).resolve())
+            item["seed_image_used"] = serialize_path(chosen)
             item["prompt_text"] = rebuild_prompt(item.get("base_prompt_text", item.get("prompt_text", "")), scene_addon)
             if len(item["prompt_text"]) > PROMPT_MAX_CHARS:
                 problems.append(f"Scene {clip_index}: prompt is over {PROMPT_MAX_CHARS} characters after mapping")
@@ -266,13 +496,25 @@ def apply_seed_mapping(plan_json, seed_dir, output_json=None, strict=False, mani
                 }
             )
 
+    mapping_report = validate_seed_mapping(
+        plan,
+        seed_dir=seed_dir,
+        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+    )
+    combined_problems = list(problems) + list(mapping_report.get("problems", []))
+    mapping_report["problems"] = combined_problems
+    mapping_report["status"] = "FAILED" if combined_problems else "PASSED"
+
     plan["seed_mapping"] = {
-        "seed_dir": str(Path(seed_dir).resolve()),
+        **mapping_report,
+        "seed_dir": serialize_path(seed_dir),
+        "seed_dir_resolved": str(resolve_runtime_path(seed_dir).resolve()),
         "strict": strict,
-        "manifest_json": str(Path(manifest_json).resolve()) if manifest_json else None,
+        "manifest_json": serialize_path(manifest_json) if manifest_json else None,
+        "manifest_json_resolved": str(resolve_runtime_path(manifest_json).resolve()) if manifest_json else None,
         "filename_hints_enabled": not no_filename_hints,
         "assignments": assignments,
-        "problems": problems,
         "label_examples": [
             "scene_01_intro_walk_forward.png",
             "scene_02_over_shoulder_glance.webp",
@@ -321,15 +563,17 @@ def main():
 
     apply_parser = sub.add_parser("apply")
     apply_parser.add_argument("--plan-json", required=True)
-    apply_parser.add_argument("--seed-dir", default="inputs\\ltx_seed_images")
+    apply_parser.add_argument("--seed-dir", default="inputs/ltx_seed_images")
     apply_parser.add_argument("--output", default=None, help="Optional output plan path. If omitted, rewrites the input plan in place.")
     apply_parser.add_argument("--strict", action="store_true", help="Require every scene to have a labeled seed image.")
+    apply_parser.add_argument("--allow-sorted-seed-fallback", action="store_true", help="Allow existing-plan or sorted seed fallback assignments.")
+    apply_parser.add_argument("--allow-duplicate-seed-reuse", action="store_true", help="Allow the same seed image to be intentionally reused by multiple scenes.")
     apply_parser.add_argument("--manifest-json", default=None, help="Optional JSON file with per-scene prompt/camera/motion overrides.")
     apply_parser.add_argument("--no-filename-hints", action="store_true", help="Assign images by filename but do not inject filename words into prompt_text.")
-    apply_parser.add_argument("--preview-md", default="outputs\\ltx_video_run\\scene_control_preview.md")
+    apply_parser.add_argument("--preview-md", default="outputs/ltx_video_run/scene_control_preview.md")
 
     template_parser = sub.add_parser("template")
-    template_parser.add_argument("--output", default="inputs\\ltx_seed_images\\scene_manifest_template.json")
+    template_parser.add_argument("--output", default="inputs/ltx_seed_images/scene_manifest_template.json")
 
     args = parser.parse_args()
 
@@ -347,12 +591,16 @@ def main():
         manifest_json=args.manifest_json,
         no_filename_hints=args.no_filename_hints,
         preview_md=args.preview_md,
+        allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
     )
 
     mapping = plan.get("seed_mapping", {})
     print("LTX scene control mapping complete.")
     print(f"Assignments: {len(mapping.get('assignments', []))}")
     print(f"Filename hints enabled: {mapping.get('filename_hints_enabled')}")
+    print(f"Mapping status: {mapping.get('status')}")
+    print(f"Fallback mode used: {mapping.get('fallback_mode_used')}")
     for assignment in mapping.get("assignments", []):
         print(f"Scene {assignment['clip_index']:02d}: {assignment['seed_file']} ({assignment['method']})")
         if assignment.get("scene_addon"):

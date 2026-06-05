@@ -12,12 +12,14 @@ try:
         run_preflight,
         submit_all,
     )
+    from .path_policy import resolve_runtime_path, serialize_path
 except ImportError:
     from ltx_holy_cheeks_pipeline import (
         build_plan,
         run_preflight,
         submit_all,
     )
+    from path_policy import resolve_runtime_path, serialize_path
 
 
 DEFAULT_PLAN_JSON = "outputs/ltx_video_run/holy_cheeks_ltx_plan.json"
@@ -50,7 +52,7 @@ def timestamp():
 
 
 def write_json(path, data):
-    path = Path(path)
+    path = resolve_runtime_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -63,7 +65,7 @@ def scalar(value):
 
 
 def extract_beat_markers(audio_path, plan):
-    audio_path = Path(audio_path)
+    audio_path = resolve_runtime_path(audio_path)
     y, sr = librosa.load(str(audio_path), sr=None, mono=True)
     duration = float(librosa.get_duration(y=y, sr=sr))
     onset_env = librosa.onset.onset_strength(y=y, sr=sr)
@@ -105,7 +107,8 @@ def extract_beat_markers(audio_path, plan):
 
     return {
         "status": "analyzed",
-        "audio_path": str(audio_path.resolve()),
+        "audio_path": serialize_path(audio_path),
+        "audio_resolved_path": str(audio_path.resolve()),
         "duration_seconds": round(duration, 3),
         "tempo_bpm": round(tempo, 3) if tempo else None,
         "beat_count": len(beat_times),
@@ -275,7 +278,7 @@ def build_stitching_manifest(plan, submit_summary):
 
 
 def write_orchestration_manifests(plan, preflight, submit_summary, output_dir, audio_path):
-    output_dir = Path(output_dir)
+    output_dir = resolve_runtime_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     beat_markers = extract_beat_markers(audio_path, plan)
@@ -301,7 +304,7 @@ def write_orchestration_manifests(plan, preflight, submit_summary, output_dir, a
     write_json(paths["retry_queue"], retry_queue)
     write_json(paths["stitching_manifest"], stitching)
 
-    return {name: str(path.resolve()) for name, path in paths.items()}
+    return {name: serialize_path(path) for name, path in paths.items()}
 
 
 def orchestrate(
@@ -317,6 +320,8 @@ def orchestrate(
     report_json=None,
     start_offset_seconds=0.0,
     beat_align=False,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
 ):
     print("=" * 60)
     print("LTX ORCHESTRATOR START")
@@ -332,6 +337,8 @@ def orchestrate(
         scene_seconds=scene_seconds,
         start_offset_seconds=start_offset_seconds,
         beat_align=beat_align,
+        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
     )
 
     print(f"Plan created: {Path(output_plan).resolve()}")
@@ -342,7 +349,12 @@ def orchestrate(
     print(f"Audio + seed image sent to LTX: {plan.get('audio_plus_seed_image_sent_to_ltx')}")
 
     print("[2/4] Running preflight...")
-    preflight = run_preflight(output_plan, DEFAULT_PREFLIGHT_JSON)
+    preflight = run_preflight(
+        output_plan,
+        DEFAULT_PREFLIGHT_JSON,
+        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+    )
     print(f"Preflight status: {preflight['status']}")
 
     submit_summary = None
@@ -359,6 +371,8 @@ def orchestrate(
             guidance_scale=guidance_scale,
             dry_run=not live,
             live=live,
+            allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
         )
 
     print("[4/4] Writing orchestration manifests...")
@@ -369,6 +383,10 @@ def orchestrate(
         output_dir=DEFAULT_ORCHESTRATION_DIR,
         audio_path=audio,
     )
+    manifest_paths_resolved = {
+        name: str(resolve_runtime_path(path).resolve())
+        for name, path in manifest_paths.items()
+    }
 
     final_status = "complete" if preflight["status"] == "PASSED" else "failed_preflight"
     result = {
@@ -379,14 +397,18 @@ def orchestrate(
         "beat_alignment_enabled": plan.get("beat_alignment_enabled"),
         "audio_to_video_enabled": plan.get("audio_to_video_enabled"),
         "audio_plus_seed_image_sent_to_ltx": plan.get("audio_plus_seed_image_sent_to_ltx"),
-        "plan_json": str(Path(output_plan).resolve()),
-        "preflight_json": str(Path(DEFAULT_PREFLIGHT_JSON).resolve()),
-        "submit_dir": str(Path(DEFAULT_SUBMIT_DIR).resolve()),
+        "plan_json": serialize_path(output_plan),
+        "plan_json_resolved": str(resolve_runtime_path(output_plan).resolve()),
+        "preflight_json": serialize_path(DEFAULT_PREFLIGHT_JSON),
+        "preflight_json_resolved": str(resolve_runtime_path(DEFAULT_PREFLIGHT_JSON).resolve()),
+        "submit_dir": serialize_path(DEFAULT_SUBMIT_DIR),
+        "submit_dir_resolved": str(resolve_runtime_path(DEFAULT_SUBMIT_DIR).resolve()),
         "manifest_paths": manifest_paths,
+        "manifest_paths_resolved": manifest_paths_resolved,
         "summary": submit_summary,
     }
 
-    final_report = Path(report_json or DEFAULT_ORCHESTRATOR_REPORT_JSON)
+    final_report = resolve_runtime_path(report_json or DEFAULT_ORCHESTRATOR_REPORT_JSON)
     final_report.parent.mkdir(parents=True, exist_ok=True)
     final_report.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
@@ -414,6 +436,8 @@ def main():
     parser.add_argument("--model", default="ltx-2-3-pro")
     parser.add_argument("--guidance-scale", type=float, default=9.0)
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    parser.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     parser.add_argument("--report-json", default=DEFAULT_ORCHESTRATOR_REPORT_JSON)
     args = parser.parse_args()
 
@@ -430,6 +454,8 @@ def main():
         report_json=args.report_json,
         start_offset_seconds=args.start_offset_seconds,
         beat_align=args.beat_align,
+        allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
     )
 
 

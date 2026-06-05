@@ -16,7 +16,7 @@ def _make_test_inputs(tmp_path):
     audio_path = tmp_path / "holy_cheeks_test.wav"
     seed_dir = tmp_path / "ltx_seed_images"
     seed_dir.mkdir()
-    seed_image = seed_dir / "seed.png"
+    seed_image = seed_dir / "scene_01_seed.png"
 
     sample_rate = 22050
     duration_seconds = 4.0

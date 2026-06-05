@@ -166,6 +166,27 @@ def assert_no_root_leaks(run_id: str) -> dict[str, Any]:
     return {"run_id": run_id, "root_leak_count": len(leaks), "root_leaks": leaks}
 
 
+def enforce_submit_hard_stop(result: dict[str, Any], render_output_expected: bool = False) -> Optional[str]:
+    if str(result.get("status", "unknown")) != "complete":
+        return None
+
+    if not render_output_expected:
+        return None
+
+    summary = result.get("summary")
+    summary_status = summary.get("status") if isinstance(summary, dict) else None
+    if summary_status == "complete":
+        return None
+
+    reason = (
+        f"Submit summary status is {summary_status!r}; expected 'complete'. "
+        "Refusing downstream assembly from partial or failed render output."
+    )
+    result["status"] = "failed_submit"
+    result["hard_stop_reason"] = reason
+    return reason
+
+
 def run_pipeline(args: argparse.Namespace) -> int:
     audio = Path(args.audio).resolve() if args.audio else find_audio()
     if not audio or not audio.exists():
@@ -207,8 +228,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
         report_json=str(paths.run_orchestrator_report),
         start_offset_seconds=args.start_offset_seconds,
         beat_align=args.beat_align,
+        allow_sorted_seed_fallback=getattr(args, "allow_sorted_seed_fallback", False),
+        allow_duplicate_seed_reuse=getattr(args, "allow_duplicate_seed_reuse", False),
     )
 
+    render_output_expected = bool(args.live or args.assemble_after)
+    hard_stop_reason = enforce_submit_hard_stop(result, render_output_expected=render_output_expected)
     pipeline_status = str(result.get("status", "unknown"))
     assembly_report: Optional[dict[str, Any]] = None
     final_copy: Optional[str] = None
@@ -239,6 +264,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
 
     leak_report = assert_no_root_leaks(paths.run_id)
 
+    if hard_stop_reason:
+        header("PIPELINE HARD STOP")
+        print(hard_stop_reason)
     header("PIPELINE RESULT")
     print(json.dumps(result, indent=2))
     if assembly_report is not None:
@@ -329,6 +357,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scene-seconds", type=float, default=8.0)
     parser.add_argument("--start-offset-seconds", type=float, default=0.0)
     parser.add_argument("--beat-align", action="store_true")
+    parser.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    parser.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     parser.add_argument("--model", default="ltx-2-3-pro")
     parser.add_argument("--guidance-scale", type=float, default=9.0)
     parser.add_argument("--run-id", default=None)

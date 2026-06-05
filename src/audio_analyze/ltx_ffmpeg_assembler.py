@@ -28,21 +28,45 @@ def normalize_path(path):
     return str(Path(path).resolve()).replace("\\", "/")
 
 
-def collect_clip_paths(stitching_manifest):
-    manifest = read_json(stitching_manifest)
+def _sorted_manifest_clips(manifest):
+    return sorted(manifest.get("clips", []), key=lambda x: int(x.get("stitch_order", x.get("clip_index", 9999))))
+
+
+def _missing_clip_item(item, reason, path=None):
+    scene = item.get("scene", {}) if isinstance(item.get("scene"), dict) else {}
+    missing = {
+        "clip_index": item.get("clip_index"),
+        "scene_index": scene.get("scene_index"),
+        "expected_mp4": item.get("expected_mp4"),
+        "reason": reason,
+    }
+    if path is not None:
+        missing["path"] = str(path)
+    return missing
+
+
+def collect_clip_paths_from_manifest(manifest):
     clips = []
     missing = []
-    for item in sorted(manifest.get("clips", []), key=lambda x: int(x.get("stitch_order", x.get("clip_index", 9999)))):
+    for item in _sorted_manifest_clips(manifest):
         mp4 = item.get("expected_mp4")
         if not mp4:
-            missing.append({"clip_index": item.get("clip_index"), "reason": "missing expected_mp4 in stitching manifest"})
+            missing.append(_missing_clip_item(item, "missing expected_mp4 in stitching manifest"))
             continue
         path = Path(mp4)
         if not path.exists():
-            missing.append({"clip_index": item.get("clip_index"), "path": str(path), "reason": "file not found"})
+            missing.append(_missing_clip_item(item, "file not found", path=path))
+            continue
+        if path.stat().st_size <= 0:
+            missing.append(_missing_clip_item(item, "file is empty", path=path))
             continue
         clips.append({"clip_index": item.get("clip_index"), "path": path})
     return clips, missing
+
+
+def collect_clip_paths(stitching_manifest):
+    manifest = read_json(stitching_manifest)
+    return collect_clip_paths_from_manifest(manifest)
 
 
 def collect_clip_paths_from_folder(input_folder):
@@ -165,8 +189,43 @@ def assemble_clips(clips, output_mp4, audio_path=None, report_json=None, dry_run
     return report
 
 
-def assemble_from_manifest(stitching_manifest, output_mp4, audio_path=None, report_json=None, dry_run=False, audio_start_seconds=0.0):
-    clips, missing = collect_clip_paths(stitching_manifest)
+def _missing_clip_report(stitching_manifest, output_mp4, audio_path, audio_start_seconds, clips, missing, expected_clip_count, allow_partial):
+    return {
+        "status": "failed_missing_clips",
+        "source": str(Path(stitching_manifest).resolve()),
+        "stitching_manifest": str(Path(stitching_manifest).resolve()),
+        "clip_count": len(clips),
+        "expected_clip_count": expected_clip_count,
+        "clips": [{"clip_index": c["clip_index"], "path": str(c["path"].resolve())} for c in clips],
+        "missing": missing,
+        "allow_partial": bool(allow_partial),
+        "output_mp4": str(Path(output_mp4).resolve()),
+        "audio_path": str(Path(audio_path).resolve()) if audio_path else None,
+        "audio_start_seconds": float(audio_start_seconds or 0.0),
+        "error": "Missing planned clips; refusing partial assembly. Pass allow_partial=True or --allow-partial to assemble available clips intentionally.",
+    }
+
+
+def assemble_from_manifest(stitching_manifest, output_mp4, audio_path=None, report_json=None, dry_run=False, audio_start_seconds=0.0, allow_partial=False):
+    manifest = read_json(stitching_manifest)
+    expected_clip_count = len(_sorted_manifest_clips(manifest))
+    clips, missing = collect_clip_paths_from_manifest(manifest)
+
+    if not allow_partial and (missing or len(clips) < expected_clip_count):
+        report = _missing_clip_report(
+            stitching_manifest=stitching_manifest,
+            output_mp4=output_mp4,
+            audio_path=audio_path,
+            audio_start_seconds=audio_start_seconds,
+            clips=clips,
+            missing=missing,
+            expected_clip_count=expected_clip_count,
+            allow_partial=allow_partial,
+        )
+        if report_json:
+            write_json(report_json, report)
+        return report
+
     report = assemble_clips(
         clips=clips,
         output_mp4=output_mp4,
@@ -178,6 +237,8 @@ def assemble_from_manifest(stitching_manifest, output_mp4, audio_path=None, repo
     )
     report["stitching_manifest"] = str(Path(stitching_manifest).resolve())
     report["missing"] = missing
+    report["expected_clip_count"] = expected_clip_count
+    report["allow_partial"] = bool(allow_partial)
     if report_json:
         write_json(report_json, report)
     return report
@@ -209,6 +270,7 @@ def main():
     parser.add_argument("--audio-start-seconds", type=float, default=0.0, help="Start the supplied audio at this offset, e.g. 85 for 1:25.")
     parser.add_argument("--report-json", default="outputs/ltx_video_run/assembled/ffmpeg_assembly_report.json")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--allow-partial", action="store_true", help="Assemble available clips even when planned clips are missing.")
     args = parser.parse_args()
 
     if args.input_folder:
@@ -229,6 +291,7 @@ def main():
             report_json=args.report_json,
             dry_run=args.dry_run,
             audio_start_seconds=args.audio_start_seconds,
+            allow_partial=args.allow_partial,
         )
 
     print(f"FFmpeg assembly status: {report['status']}")
@@ -239,7 +302,8 @@ def main():
         for item in report["missing"]:
             print(f"MISSING: {item}")
     print(f"Report: {Path(args.report_json).resolve()}")
+    return 0 if str(report.get("status", "")).lower() in {"complete", "dry_run"} else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

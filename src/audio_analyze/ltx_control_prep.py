@@ -5,13 +5,14 @@ import json
 from .ltx_seed_mapper import apply_seed_mapping, read_json, write_json, make_preview_report
 from .ltx_holy_cheeks_pipeline import run_preflight
 from .ltx_prompt_maximizer import maximize_plan_prompts, DEFAULT_PROMPT_MAX_CHARS, DEFAULT_PROMPT_TARGET_CHARS
+from .path_policy import resolve_runtime_path, serialize_path
 
 
-DEFAULT_PLAN = "outputs\\ltx_video_run\\holy_cheeks_ltx_plan.json"
-DEFAULT_SEED_DIR = "inputs\\ltx_seed_images"
-DEFAULT_PREVIEW = "outputs\\ltx_video_run\\scene_control_preview.md"
-DEFAULT_PREFLIGHT = "outputs\\ltx_video_run\\preflight_report.json"
-DEFAULT_STATUS = "outputs\\ltx_video_run\\scene_control_status.json"
+DEFAULT_PLAN = "outputs/ltx_video_run/holy_cheeks_ltx_plan.json"
+DEFAULT_SEED_DIR = "inputs/ltx_seed_images"
+DEFAULT_PREVIEW = "outputs/ltx_video_run/scene_control_preview.md"
+DEFAULT_PREFLIGHT = "outputs/ltx_video_run/preflight_report.json"
+DEFAULT_STATUS = "outputs/ltx_video_run/scene_control_status.json"
 
 
 def build_scene_control_status(plan_json, preflight_report, output_json):
@@ -25,10 +26,18 @@ def build_scene_control_status(plan_json, preflight_report, output_json):
 
     status = {
         "status": "PASSED" if not problems and preflight.get("status") == "PASSED" else "NEEDS_ATTENTION",
-        "plan_json": str(Path(plan_json).resolve()),
-        "preflight_report": str(Path(preflight_report).resolve()),
+        "plan_json": serialize_path(plan_json),
+        "plan_json_resolved": str(resolve_runtime_path(plan_json).resolve()),
+        "preflight_report": serialize_path(preflight_report),
+        "preflight_report_resolved": str(resolve_runtime_path(preflight_report).resolve()),
         "scene_count": len(results),
         "mapping_problem_count": len(mapping.get("problems", [])),
+        "mapping_status": mapping.get("status"),
+        "mapped_scene_count": mapping.get("mapped_scene_count"),
+        "missing_mappings": mapping.get("missing_mappings", []),
+        "duplicate_seed_usage": mapping.get("duplicate_seed_usage", []),
+        "extra_seed_files": mapping.get("extra_seed_files", []),
+        "fallback_mode_used": mapping.get("fallback_mode_used"),
         "prompt_maximizer_problem_count": len(maximizer.get("problems", [])),
         "preflight_status": preflight.get("status"),
         "filename_hints_enabled": mapping.get("filename_hints_enabled"),
@@ -66,6 +75,8 @@ def main():
     parser.add_argument("--preflight-output", default=DEFAULT_PREFLIGHT)
     parser.add_argument("--status-output", default=DEFAULT_STATUS)
     parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    parser.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     parser.add_argument("--no-filename-hints", action="store_true")
     parser.add_argument("--maximize-prompts", action="store_true", help="Expand each scene prompt toward the configured character target before preflight.")
     parser.add_argument("--prompt-max-chars", type=int, default=DEFAULT_PROMPT_MAX_CHARS)
@@ -79,6 +90,8 @@ def main():
         manifest_json=args.manifest_json,
         no_filename_hints=args.no_filename_hints,
         preview_md=args.preview_md,
+        allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
     )
 
     if args.maximize_prompts:
@@ -89,7 +102,12 @@ def main():
         )
         make_preview_report(plan, args.preview_md)
 
-    preflight = run_preflight(args.plan_json, args.preflight_output)
+    preflight = run_preflight(
+        args.plan_json,
+        args.preflight_output,
+        allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
+    )
     status = build_scene_control_status(args.plan_json, args.preflight_output, args.status_output)
 
     print("LTX scene-control prep complete.")
