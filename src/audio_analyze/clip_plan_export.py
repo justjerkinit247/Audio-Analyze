@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import json
 
 try:
     from .path_policy import resolve_runtime_path, serialize_path
@@ -17,9 +18,47 @@ def split_prompt_sections(prompt_text: str) -> dict[str, str]:
     prompt_text = str(prompt_text or "").strip()
     return {
         "visual_prompt": prompt_text,
-        "choreography_motion_prompt": "See compiled prompt text for scene-specific movement instructions.",
+        "motion_prompt": "See compiled prompt text for scene-specific motion instructions.",
         "camera_prompt": "See compiled prompt text for scene-specific camera instructions.",
-        "negative_prompt": "See compiled prompt text for scene-specific negative constraints.",
+        "constraint_prompt": "See compiled prompt text for scene-specific constraints.",
+    }
+
+
+def scene_specific_prompt_block(item: dict[str, Any]) -> str:
+    clip_index = int(item.get("clip_index", 0))
+    scene = item.get("scene", {}) if isinstance(item.get("scene"), dict) else {}
+    seed_assignment = item.get("seed_assignment", {}) if isinstance(item.get("seed_assignment"), dict) else {}
+    seed_file = seed_assignment.get("seed_file") or Path(str(item.get("seed_image_used", ""))).name
+    seed_hint = item.get("seed_filename_prompt_hint") or seed_assignment.get("filename_prompt_hint") or ""
+    return (
+        f"SCENE-SPECIFIC CLIP {clip_index:02d}. "
+        f"Use seed image file {seed_file} as the visual source of truth for this clip only. "
+        f"Seed filename hint: {seed_hint}. "
+        f"Scene timing: {scene.get('start')}s to {scene.get('end')}s, duration {scene.get('duration')}s. "
+        "Make this clip visually and rhythmically specific to its seed image, timestamp range, and scene index. "
+        "Preserve the seed framing, layout, lighting direction, background continuity, and subject identity. "
+        "Sync visible motion to percussive beat-grid targets from the source audio. "
+        "Avoid off-grid random motion, geometry drift, identity drift, and unplanned scene changes."
+    )
+
+
+def apply_scene_specific_prompt_text(item: dict[str, Any]) -> None:
+    base_prompt = str(item.get("prompt_text") or "").strip()
+    block = scene_specific_prompt_block(item)
+    if "SCENE-SPECIFIC CLIP" in base_prompt:
+        prompt_text = base_prompt
+    else:
+        prompt_text = f"{block} {base_prompt}".strip()
+    item["base_prompt_text"] = base_prompt
+    item["prompt_text"] = prompt_text
+    item["ltx_payload_prompt"] = prompt_text
+    item["scene_specific_prompt_applied"] = True
+    item["scene_specific_prompt_source"] = "clip_plan_export.scene_specific_prompt_block"
+    item["prompt_sections"] = {
+        "visual_prompt": f"Seed image source: {item.get('seed_image_used')}. Seed filename hint: {item.get('seed_filename_prompt_hint') or ''}.",
+        "motion_prompt": "Scene-specific motion should match this exact timestamp range and the source audio beat grid.",
+        "camera_prompt": "Camera behavior should preserve the seed image framing and scene continuity.",
+        "constraint_prompt": "Avoid off-grid random motion, geometry drift, identity drift, and unplanned scene changes.",
     }
 
 
@@ -51,6 +90,7 @@ def build_clip_plan(item: dict[str, Any], analysis: dict[str, Any], clip_plan_js
         "seed_filename_prompt_hint": item.get("seed_filename_prompt_hint"),
         "seed_assignment": item.get("seed_assignment", {}),
         "prompt_sections": item.get("prompt_sections") or split_prompt_sections(item.get("prompt_text", "")),
+        "base_prompt_text": item.get("base_prompt_text"),
         "ltx_payload_prompt": item.get("prompt_text"),
         "prompt_text": item.get("prompt_text"),
         "resolution": item.get("resolution"),
@@ -91,8 +131,9 @@ def write_clip_plans(output_json: str | Path, plan: dict[str, Any]) -> list[str]
         item["clip_plan_json"] = clip_rel
         item["clip_plan_resolved_path"] = str(clip_path.resolve())
         item["compiled_from_clip_plan"] = True
+        apply_scene_specific_prompt_text(item)
         clip_plan = build_clip_plan(item, analysis, clip_plan_json=clip_rel)
-        clip_path.write_text(__import__("json").dumps(clip_plan, indent=2), encoding="utf-8")
+        clip_path.write_text(json.dumps(clip_plan, indent=2), encoding="utf-8")
         written.append(clip_rel)
     plan["compiled_from_clip_plans"] = True
     plan["clip_plan_dir"] = serialize_path(clip_plan_dir)
