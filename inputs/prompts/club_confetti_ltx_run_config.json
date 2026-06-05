@@ -1,0 +1,12 @@
+﻿{
+    "project":  "club_confetti_ltx",
+    "seed_image_path":  "C:\\Users\\Tt-rexX\\Documents\\GitHub\\Audio-Analyze\\inputs\\images\\club_confetti_seed.jpg",
+    "audio_path":  "C:\\Users\\Tt-rexX\\Documents\\GitHub\\Audio-Analyze\\inputs\\audio\\song.mp3",
+    "prompt_path":  "C:\\Users\\Tt-rexX\\Documents\\GitHub\\Audio-Analyze\\inputs\\prompts\\club_confetti_ltx_prompt.txt",
+    "negative_prompt_path":  "C:\\Users\\Tt-rexX\\Documents\\GitHub\\Audio-Analyze\\inputs\\prompts\\club_confetti_ltx_negative_prompt.txt",
+    "output_root":  "C:\\Users\\Tt-rexX\\Documents\\GitHub\\Audio-Analyze\\outputs\\ltx_video_run",
+    "state_root":  "C:\\Users\\Tt-rexX\\Documents\\GitHub\\Audio-Analyze\\outputs\\ltx_video_run\\_state",
+    "target_fps":  24,
+    "camera":  "slow forward dolly with slight handheld sway",
+    "sync_rule":  "visible dance motion lands on kick/snare accents; lighting/confetti subtly reacts to bass"
+}
