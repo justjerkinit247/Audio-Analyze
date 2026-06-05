@@ -1,5 +1,6 @@
 from pathlib import Path
 import argparse
+import hashlib
 import json
 import time
 import traceback
@@ -11,6 +12,24 @@ DEFAULT_PLAN = "outputs\\ltx_video_run\\holy_cheeks_ltx_plan.json"
 DEFAULT_OUTPUT_DIR = "outputs\\ltx_video_run"
 DEFAULT_MODEL = "ltx-2-3-pro"
 DEFAULT_GUIDANCE_SCALE = 9.0
+FINGERPRINT_SCHEMA = "ltx.submit_resilient.clip_fingerprint.v1"
+METADATA_SCHEMA = "ltx.submit_resilient.clip_metadata.v1"
+FINGERPRINT_FIELDS = [
+    "clip_index",
+    "file_stem",
+    "prompt_text",
+    "base_prompt_text",
+    "seed_image_used",
+    "seed_filename_prompt_hint",
+    "seed_assignment",
+    "source_audio_path",
+    "scene_audio_path",
+    "scene",
+    "resolution",
+    "audio_to_video_confirmed",
+    "beat_alignment_enabled",
+    "prompt_maximizer",
+]
 
 
 def write_json(path, data):
@@ -24,6 +43,142 @@ def expected_mp4_path(output_dir, item):
     file_stem = safe_name(item.get("file_stem", "ltx_output"))
     clip_index = int(item["clip_index"])
     return downloads / f"{file_stem}_ltx_scene_{clip_index:02d}.mp4"
+
+
+def metadata_path_for_mp4(mp4_path):
+    mp4_path = Path(mp4_path)
+    return mp4_path.with_name(f"{mp4_path.stem}.metadata.json")
+
+
+def clip_fingerprint_payload(item, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE):
+    payload = {
+        "schema": FINGERPRINT_SCHEMA,
+        "model": model,
+        "guidance_scale": float(guidance_scale),
+    }
+    for field in FINGERPRINT_FIELDS:
+        payload[field] = item.get(field)
+    return payload
+
+
+def clip_fingerprint(item, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE):
+    payload = clip_fingerprint_payload(item, model=model, guidance_scale=guidance_scale)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def read_json_if_exists(path):
+    path = Path(path)
+    if not path.exists():
+        return None, "missing"
+    try:
+        return read_json(path), None
+    except Exception as exc:
+        return None, f"unreadable: {exc}"
+
+
+def stored_fingerprint_from_metadata(metadata):
+    if not isinstance(metadata, dict):
+        return None
+    return metadata.get("clip_fingerprint") or metadata.get("fingerprint")
+
+
+def validate_existing_clip(output_dir, item, result_path, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE):
+    mp4_path = expected_mp4_path(output_dir, item)
+    metadata_path = metadata_path_for_mp4(mp4_path)
+    expected = clip_fingerprint(item, model=model, guidance_scale=guidance_scale)
+    base = {
+        "expected_fingerprint": expected,
+        "mp4_path": str(mp4_path.resolve()),
+        "metadata_json": str(metadata_path.resolve()),
+        "result_json": str(Path(result_path).resolve()),
+    }
+
+    if not mp4_path.exists():
+        return {**base, "status": "missing_mp4", "reusable": False, "reason": "expected MP4 does not exist"}
+    if mp4_path.stat().st_size <= 0:
+        return {**base, "status": "mp4_empty", "reusable": False, "reason": "expected MP4 is empty"}
+
+    metadata, metadata_error = read_json_if_exists(metadata_path)
+    result, result_error = read_json_if_exists(result_path)
+
+    metadata_sources = []
+    if metadata is not None:
+        metadata_sources.append(("metadata_json", metadata, str(metadata_path.resolve())))
+    if result is not None:
+        metadata_sources.append(("result_json", result, str(Path(result_path).resolve())))
+
+    if not metadata_sources:
+        return {
+            **base,
+            "status": "metadata_missing_or_unreadable",
+            "reusable": False,
+            "reason": "missing or unreadable clip metadata",
+            "metadata_error": metadata_error,
+            "result_error": result_error,
+        }
+
+    for source_type, data, source_path in metadata_sources:
+        stored = stored_fingerprint_from_metadata(data)
+        if not stored:
+            continue
+        if stored == expected:
+            return {
+                **base,
+                "status": "matched",
+                "reusable": True,
+                "reason": "existing MP4 fingerprint matches current plan",
+                "stored_fingerprint": stored,
+                "metadata_source": source_type,
+                "metadata_source_path": source_path,
+            }
+        return {
+            **base,
+            "status": "fingerprint_mismatch",
+            "reusable": False,
+            "reason": "existing MP4 fingerprint does not match current plan",
+            "stored_fingerprint": stored,
+            "metadata_source": source_type,
+            "metadata_source_path": source_path,
+        }
+
+    return {
+        **base,
+        "status": "fingerprint_missing",
+        "reusable": False,
+        "reason": "clip metadata does not contain a fingerprint",
+    }
+
+
+def write_clip_metadata(output_dir, item, result_path, result, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE):
+    mp4_path = expected_mp4_path(output_dir, item)
+    metadata_path = metadata_path_for_mp4(mp4_path)
+    fingerprint_payload = clip_fingerprint_payload(item, model=model, guidance_scale=guidance_scale)
+    fingerprint = clip_fingerprint(item, model=model, guidance_scale=guidance_scale)
+
+    result["fingerprint_schema"] = FINGERPRINT_SCHEMA
+    result["clip_fingerprint"] = fingerprint
+    result["clip_fingerprint_payload"] = fingerprint_payload
+    write_json(result_path, result)
+
+    metadata = {
+        "schema": METADATA_SCHEMA,
+        "fingerprint_schema": FINGERPRINT_SCHEMA,
+        "clip_fingerprint": fingerprint,
+        "clip_fingerprint_payload": fingerprint_payload,
+        "clip_index": item.get("clip_index"),
+        "file_stem": item.get("file_stem"),
+        "model": model,
+        "guidance_scale": float(guidance_scale),
+        "mp4_path": str(mp4_path.resolve()),
+        "result_json": str(Path(result_path).resolve()),
+        "downloaded_mp4": result.get("downloaded_mp4"),
+        "status": result.get("status"),
+    }
+    if mp4_path.exists() and mp4_path.stat().st_size > 0:
+        write_json(metadata_path, metadata)
+        return str(metadata_path.resolve())
+    return None
 
 
 def submit_resilient(plan_json=DEFAULT_PLAN, output_dir=DEFAULT_OUTPUT_DIR, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE, live=False, retries=2, retry_sleep_seconds=8.0, only_missing=True):
@@ -45,6 +200,8 @@ def submit_resilient(plan_json=DEFAULT_PLAN, output_dir=DEFAULT_OUTPUT_DIR, mode
         "failed_scenes": [],
         "completed_scenes": [],
         "skipped_existing_scenes": [],
+        "stale_existing_scenes": [],
+        "stale_existing_details": [],
     }
     write_json(summary_path, summary)
 
@@ -54,17 +211,47 @@ def submit_resilient(plan_json=DEFAULT_PLAN, output_dir=DEFAULT_OUTPUT_DIR, mode
         result_path = output_dir / f"scene_{idx:02d}_result.json"
 
         if only_missing and mp4_path.exists():
-            row = {
+            validation = validate_existing_clip(output_dir, item, result_path, model=model, guidance_scale=guidance_scale)
+            if validation["reusable"]:
+                row = {
+                    "clip_index": idx,
+                    "status": "skipped_existing",
+                    "downloaded_mp4": str(mp4_path.resolve()),
+                    "result_json": str(result_path.resolve()),
+                    "clip_fingerprint": validation["expected_fingerprint"],
+                    "fingerprint_validation": validation,
+                }
+                summary["results"].append(row)
+                summary["skipped_existing_scenes"].append(idx)
+                write_json(summary_path, summary)
+                print(f"Scene {idx:02d}: existing MP4 fingerprint matched, skipping.")
+                continue
+
+            stale_detail = {
                 "clip_index": idx,
-                "status": "skipped_existing",
-                "downloaded_mp4": str(mp4_path.resolve()),
+                "mp4_path": str(mp4_path.resolve()),
                 "result_json": str(result_path.resolve()),
+                "fingerprint_validation": validation,
+                "reason": validation["reason"],
             }
-            summary["results"].append(row)
-            summary["skipped_existing_scenes"].append(idx)
+            summary["stale_existing_scenes"].append(idx)
+            summary["stale_existing_details"].append(stale_detail)
             write_json(summary_path, summary)
-            print(f"Scene {idx:02d}: existing MP4 found, skipping.")
-            continue
+            print(f"Scene {idx:02d}: existing MP4 is stale; {validation['reason']}.")
+            if not live:
+                row = {
+                    "clip_index": idx,
+                    "status": "would_resubmit_stale",
+                    "downloaded_mp4": None,
+                    "result_json": str(result_path.resolve()),
+                    "clip_fingerprint": validation["expected_fingerprint"],
+                    "fingerprint_validation": validation,
+                    "stale_existing": True,
+                    "reason": "dry-run would resubmit stale existing MP4",
+                }
+                summary["results"].append(row)
+                write_json(summary_path, summary)
+                continue
 
         last_error = None
         for attempt in range(1, int(retries) + 2):
@@ -79,6 +266,14 @@ def submit_resilient(plan_json=DEFAULT_PLAN, output_dir=DEFAULT_OUTPUT_DIR, mode
                     dry_run=not live,
                     live=live,
                 )
+                metadata_path = write_clip_metadata(
+                    output_dir=output_dir,
+                    item=item,
+                    result_path=result_path,
+                    result=result,
+                    model=model,
+                    guidance_scale=guidance_scale,
+                )
                 row = {
                     "clip_index": idx,
                     "status": result.get("status"),
@@ -86,6 +281,8 @@ def submit_resilient(plan_json=DEFAULT_PLAN, output_dir=DEFAULT_OUTPUT_DIR, mode
                     "scene_audio_format": result.get("scene_audio_format"),
                     "downloaded_mp4": result.get("downloaded_mp4"),
                     "result_json": str(result_path.resolve()),
+                    "metadata_json": metadata_path,
+                    "clip_fingerprint": result.get("clip_fingerprint"),
                     "attempts": attempt,
                 }
                 summary["results"].append(row)
