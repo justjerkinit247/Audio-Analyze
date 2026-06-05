@@ -144,7 +144,7 @@ def cleanup_temp_files(root: Path, dry_run: bool = False) -> dict[str, Any]:
 
 def test_imports() -> int:
     header("IMPORT TEST")
-    modules = ["ltx_orchestrator", "ltx_ffmpeg_assembler", "ltx_holy_cheeks_pipeline"]
+    modules = ["ltx_orchestrator", "ltx_ffmpeg_assembler", "ltx_holy_cheeks_pipeline", "clip_plan_export"]
     for name in modules:
         try:
             __import__(f"src.audio_analyze.{name}")
@@ -164,6 +164,20 @@ def assert_no_root_leaks(run_id: str) -> dict[str, Any]:
                 continue
             leaks.append(rel(path))
     return {"run_id": run_id, "root_leak_count": len(leaks), "root_leaks": leaks}
+
+
+def export_scene_clip_plans(plan_json: Path) -> dict[str, Any]:
+    from src.audio_analyze.clip_plan_export import write_clip_plans
+
+    plan = json.loads(plan_json.read_text(encoding="utf-8-sig"))
+    written = write_clip_plans(plan_json, plan)
+    plan_json.write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    return {
+        "status": "complete",
+        "clip_plan_dir": plan.get("clip_plan_dir"),
+        "clip_plan_count": len(written),
+        "clip_plan_json_files": written,
+    }
 
 
 def enforce_submit_hard_stop(result: dict[str, Any], render_output_expected: bool = False) -> Optional[str]:
@@ -232,6 +246,12 @@ def run_pipeline(args: argparse.Namespace) -> int:
         allow_duplicate_seed_reuse=getattr(args, "allow_duplicate_seed_reuse", False),
     )
 
+    clip_plan_report = None
+    if output_plan.exists():
+        clip_plan_report = export_scene_clip_plans(output_plan)
+        result["clip_plan_export"] = clip_plan_report
+        paths.run_orchestrator_report.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
     render_output_expected = bool(args.live or args.assemble_after)
     hard_stop_reason = enforce_submit_hard_stop(result, render_output_expected=render_output_expected)
     pipeline_status = str(result.get("status", "unknown"))
@@ -269,6 +289,9 @@ def run_pipeline(args: argparse.Namespace) -> int:
         print(hard_stop_reason)
     header("PIPELINE RESULT")
     print(json.dumps(result, indent=2))
+    if clip_plan_report is not None:
+        header("CLIP PLAN EXPORT")
+        print(json.dumps(clip_plan_report, indent=2))
     if assembly_report is not None:
         header("ASSEMBLY RESULT")
         print(json.dumps(assembly_report, indent=2))
