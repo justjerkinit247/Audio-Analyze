@@ -181,7 +181,18 @@ def write_clip_metadata(output_dir, item, result_path, result, model=DEFAULT_MOD
     return None
 
 
-def submit_resilient(plan_json=DEFAULT_PLAN, output_dir=DEFAULT_OUTPUT_DIR, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE, live=False, retries=2, retry_sleep_seconds=8.0, only_missing=True):
+def submit_resilient(
+    plan_json=DEFAULT_PLAN,
+    output_dir=DEFAULT_OUTPUT_DIR,
+    model=DEFAULT_MODEL,
+    guidance_scale=DEFAULT_GUIDANCE_SCALE,
+    live=False,
+    retries=2,
+    retry_sleep_seconds=8.0,
+    only_missing=True,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
+):
     plan = read_json(plan_json)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -196,6 +207,8 @@ def submit_resilient(plan_json=DEFAULT_PLAN, output_dir=DEFAULT_OUTPUT_DIR, mode
         "retries": int(retries),
         "retry_sleep_seconds": float(retry_sleep_seconds),
         "only_missing": bool(only_missing),
+        "allow_sorted_seed_fallback": bool(allow_sorted_seed_fallback),
+        "allow_duplicate_seed_reuse": bool(allow_duplicate_seed_reuse),
         "results": [],
         "failed_scenes": [],
         "completed_scenes": [],
@@ -265,6 +278,8 @@ def submit_resilient(plan_json=DEFAULT_PLAN, output_dir=DEFAULT_OUTPUT_DIR, mode
                     guidance_scale=guidance_scale,
                     dry_run=not live,
                     live=live,
+                    allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+                    allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
                 )
                 metadata_path = write_clip_metadata(
                     output_dir=output_dir,
@@ -335,6 +350,8 @@ def main():
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--retry-sleep-seconds", type=float, default=8.0)
     parser.add_argument("--all", action="store_true", help="Submit all scenes even when an MP4 already exists. Default submits only missing scenes.")
+    parser.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    parser.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     args = parser.parse_args()
 
     submit_resilient(
@@ -346,6 +363,8 @@ def main():
         retries=args.retries,
         retry_sleep_seconds=args.retry_sleep_seconds,
         only_missing=not args.all,
+        allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
     )
 
 

@@ -317,6 +317,8 @@ def orchestrate(
     report_json=None,
     start_offset_seconds=0.0,
     beat_align=False,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
 ):
     print("=" * 60)
     print("LTX ORCHESTRATOR START")
@@ -332,6 +334,8 @@ def orchestrate(
         scene_seconds=scene_seconds,
         start_offset_seconds=start_offset_seconds,
         beat_align=beat_align,
+        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
     )
 
     print(f"Plan created: {Path(output_plan).resolve()}")
@@ -342,7 +346,12 @@ def orchestrate(
     print(f"Audio + seed image sent to LTX: {plan.get('audio_plus_seed_image_sent_to_ltx')}")
 
     print("[2/4] Running preflight...")
-    preflight = run_preflight(output_plan, DEFAULT_PREFLIGHT_JSON)
+    preflight = run_preflight(
+        output_plan,
+        DEFAULT_PREFLIGHT_JSON,
+        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+    )
     print(f"Preflight status: {preflight['status']}")
 
     submit_summary = None
@@ -359,6 +368,8 @@ def orchestrate(
             guidance_scale=guidance_scale,
             dry_run=not live,
             live=live,
+            allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
         )
 
     print("[4/4] Writing orchestration manifests...")
@@ -414,6 +425,8 @@ def main():
     parser.add_argument("--model", default="ltx-2-3-pro")
     parser.add_argument("--guidance-scale", type=float, default=9.0)
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    parser.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     parser.add_argument("--report-json", default=DEFAULT_ORCHESTRATOR_REPORT_JSON)
     args = parser.parse_args()
 
@@ -430,6 +443,8 @@ def main():
         report_json=args.report_json,
         start_offset_seconds=args.start_offset_seconds,
         beat_align=args.beat_align,
+        allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
     )
 
 

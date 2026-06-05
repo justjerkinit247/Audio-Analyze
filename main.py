@@ -228,6 +228,8 @@ def run_pipeline(args: argparse.Namespace) -> int:
         report_json=str(paths.run_orchestrator_report),
         start_offset_seconds=args.start_offset_seconds,
         beat_align=args.beat_align,
+        allow_sorted_seed_fallback=getattr(args, "allow_sorted_seed_fallback", False),
+        allow_duplicate_seed_reuse=getattr(args, "allow_duplicate_seed_reuse", False),
     )
 
     render_output_expected = bool(args.live or args.assemble_after)
@@ -355,6 +357,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scene-seconds", type=float, default=8.0)
     parser.add_argument("--start-offset-seconds", type=float, default=0.0)
     parser.add_argument("--beat-align", action="store_true")
+    parser.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    parser.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     parser.add_argument("--model", default="ltx-2-3-pro")
     parser.add_argument("--guidance-scale", type=float, default=9.0)
     parser.add_argument("--run-id", default=None)

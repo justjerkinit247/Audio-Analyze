@@ -12,8 +12,10 @@ import soundfile as sf
 
 try:
     from .ltx_client import LTXClient, LTXError
+    from .ltx_seed_mapper import collect_labeled_seed_images, expected_scene_mapping_key, validate_seed_mapping
 except ImportError:
     from ltx_client import LTXClient, LTXError
+    from ltx_seed_mapper import collect_labeled_seed_images, expected_scene_mapping_key, validate_seed_mapping
 
 
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp"}
@@ -254,11 +256,23 @@ def build_prompt(file_stem, analysis, scene, seed_image=None):
     )
 
 
-def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=None, scene_seconds=DEFAULT_SCENE_SECONDS, start_offset_seconds=0.0, beat_align=False):
+def build_plan(
+    audio_path,
+    seed_dir,
+    output_json,
+    resolution="9:16",
+    max_scenes=None,
+    scene_seconds=DEFAULT_SCENE_SECONDS,
+    start_offset_seconds=0.0,
+    beat_align=False,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
+):
     audio_path = Path(audio_path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path.resolve()}")
     images = list_seed_images(seed_dir)
+    labeled_seed_images, _ = collect_labeled_seed_images(seed_dir)
     analysis = analyze_audio(audio_path)
     duration, tempo, beat_times = detect_beats(audio_path)
     start_offset_seconds = max(0.0, float(start_offset_seconds or 0.0))
@@ -275,14 +289,36 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
     analysis["sync_policy"] = "Scene starts and scene changes are snapped to detected beat positions." if beat_align else "Fixed scene intervals."
 
     results = []
+    seed_assignments = []
     for idx, scene in enumerate(scenes, start=1):
-        image = images[idx - 1]
+        expected_key = expected_scene_mapping_key(idx)
+        if idx in labeled_seed_images:
+            image = labeled_seed_images[idx][0]
+            seed_mapping_method = "scene_label"
+        elif idx - 1 < len(images):
+            image = images[idx - 1]
+            seed_mapping_method = "sorted_seed_fallback"
+        else:
+            image = None
+            seed_mapping_method = "missing"
+        seed_path = str(image.resolve()) if image else ""
+        seed_hint = seed_filename_hint(image) if image else ""
+        seed_assignment = {
+            "method": seed_mapping_method,
+            "seed_file": image.name if image else None,
+            "seed_image_path": seed_path,
+            "scene_label_expected": expected_key,
+            "filename_prompt_hint": seed_hint,
+            "fallback_allowed": bool(allow_sorted_seed_fallback),
+            "mapping_source": "build_plan",
+        }
         results.append({
             "clip_index": idx,
             "file_stem": audio_path.stem,
             "source_audio_path": str(audio_path.resolve()),
-            "seed_image_used": str(image.resolve()),
-            "seed_filename_prompt_hint": seed_filename_hint(image),
+            "seed_image_used": seed_path,
+            "seed_filename_prompt_hint": seed_hint,
+            "seed_assignment": seed_assignment,
             "scene": scene,
             "resolution": resolution,
             "prompt_text": build_prompt(audio_path.stem, analysis, scene, seed_image=image),
@@ -290,6 +326,16 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
             "audio_to_video_confirmed": True,
             "beat_alignment_enabled": bool(beat_align),
         })
+        seed_assignments.append(
+            {
+                "clip_index": idx,
+                "seed_file": image.name if image else None,
+                "seed_image_path": seed_path,
+                "method": seed_mapping_method,
+                "scene_label_expected": expected_key,
+                "filename_prompt_hint": seed_hint,
+            }
+        )
     plan = {
         "file_stem": audio_path.stem,
         "analysis": analysis,
@@ -304,6 +350,24 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
         "audio_plus_seed_image_sent_to_ltx": True,
         "results": results,
         "status": "planned",
+    }
+    seed_mapping_report = validate_seed_mapping(
+        plan,
+        seed_dir=seed_dir,
+        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+    )
+    plan["seed_mapping"] = {
+        **seed_mapping_report,
+        "seed_dir": str(Path(seed_dir).resolve()),
+        "source": "build_plan",
+        "assignments": seed_assignments,
+        "label_examples": [
+            "scene_01_intro_walk_forward.png",
+            "scene_02_over_shoulder_glance.webp",
+            "clip_03_twerk_accent_wide_angle.jpg",
+            "s04_group_walk_camera_arc.jpeg",
+        ],
     }
     write_json(output_json, plan)
     return plan
@@ -370,7 +434,16 @@ def _validate_submit_settings(problems, clip_index, model=None, guidance_scale=N
             )
 
 
-def validate_plan(plan, model=None, guidance_scale=None, clip_index=None):
+def validate_plan(
+    plan,
+    model=None,
+    guidance_scale=None,
+    clip_index=None,
+    require_seed_mapping=False,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
+    seed_dir=None,
+):
     problems = []
     if not plan.get("results"):
         problems.append("Plan has no scene results.")
@@ -408,13 +481,43 @@ def validate_plan(plan, model=None, guidance_scale=None, clip_index=None):
         if resolution not in set(RESOLUTION_MAP.values()):
             problems.append(validation_problem(idx, "resolution", f"unsupported or unnormalized value: {resolution}"))
         _validate_submit_settings(problems, idx, model=model, guidance_scale=guidance_scale)
+    if require_seed_mapping:
+        seed_mapping_report = validate_seed_mapping(
+            plan,
+            seed_dir=seed_dir,
+            allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+        )
+        problems.extend(seed_mapping_report.get("problems", []))
     return problems
 
 
-def run_preflight(plan_json, output_json=None):
+def run_preflight(
+    plan_json,
+    output_json=None,
+    require_seed_mapping=True,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
+    seed_dir=None,
+):
     plan = read_json(plan_json)
+    seed_mapping_report = None
     problems = validate_plan(plan)
-    report = {"status": "FAILED" if problems else "PASSED", "scene_count": len(plan.get("results", [])), "problems": problems, "plan_json": str(Path(plan_json).resolve())}
+    if require_seed_mapping:
+        seed_mapping_report = validate_seed_mapping(
+            plan,
+            seed_dir=seed_dir,
+            allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+        )
+        problems.extend(seed_mapping_report.get("problems", []))
+    report = {
+        "status": "FAILED" if problems else "PASSED",
+        "scene_count": len(plan.get("results", [])),
+        "problems": problems,
+        "plan_json": str(Path(plan_json).resolve()),
+        "seed_mapping_validation": seed_mapping_report,
+    }
     if output_json:
         write_json(output_json, report)
     return report
@@ -462,7 +565,17 @@ def _get_plan_item(plan, clip_index):
     raise ValueError(f"Clip index {clip_index} not found")
 
 
-def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE, dry_run=True, live=False):
+def submit_one(
+    plan_json,
+    output_json,
+    clip_index,
+    model=DEFAULT_MODEL,
+    guidance_scale=DEFAULT_GUIDANCE_SCALE,
+    dry_run=True,
+    live=False,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
+):
     if live and dry_run:
         raise ValueError("Use either dry_run or live, not both.")
     if not dry_run and not live:
@@ -471,7 +584,15 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
         raise RuntimeError("LTXV_API_KEY is not set. Refusing live LTX call.")
 
     plan = read_json(plan_json)
-    problems = validate_plan(plan, model=model, guidance_scale=guidance_scale, clip_index=clip_index)
+    problems = validate_plan(
+        plan,
+        model=model,
+        guidance_scale=guidance_scale,
+        clip_index=clip_index,
+        require_seed_mapping=True,
+        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+    )
     if problems:
         raise RuntimeError("Preflight failed; refusing submit. Problems:\n" + "\n".join(problems))
 
@@ -527,7 +648,16 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
     return result
 
 
-def submit_all(plan_json, output_dir, model=DEFAULT_MODEL, guidance_scale=DEFAULT_GUIDANCE_SCALE, dry_run=True, live=False):
+def submit_all(
+    plan_json,
+    output_dir,
+    model=DEFAULT_MODEL,
+    guidance_scale=DEFAULT_GUIDANCE_SCALE,
+    dry_run=True,
+    live=False,
+    allow_sorted_seed_fallback=False,
+    allow_duplicate_seed_reuse=False,
+):
     plan = read_json(plan_json)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -538,7 +668,17 @@ def submit_all(plan_json, output_dir, model=DEFAULT_MODEL, guidance_scale=DEFAUL
     for item in plan.get("results", []):
         idx = int(item["clip_index"])
         result_path = output_dir / f"scene_{idx:02d}_result.json"
-        result = submit_one(plan_json, result_path, idx, model, guidance_scale, dry_run=dry_run, live=live)
+        result = submit_one(
+            plan_json,
+            result_path,
+            idx,
+            model,
+            guidance_scale,
+            dry_run=dry_run,
+            live=live,
+            allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+        )
         if result.get("status") == "failed":
             failed_count += 1
         summary["results"].append({
@@ -567,9 +707,13 @@ def main():
     p1.add_argument("--scene-seconds", type=float, default=DEFAULT_SCENE_SECONDS)
     p1.add_argument("--start-offset-seconds", type=float, default=0.0)
     p1.add_argument("--beat-align", action="store_true")
+    p1.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    p1.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     p_pre = sub.add_parser("preflight")
     p_pre.add_argument("--plan-json", required=True)
     p_pre.add_argument("--output", default=None)
+    p_pre.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    p_pre.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     p2 = sub.add_parser("submit-one")
     p2.add_argument("--plan-json", required=True)
     p2.add_argument("--output", required=True)
@@ -577,23 +721,44 @@ def main():
     p2.add_argument("--model", default=DEFAULT_MODEL)
     p2.add_argument("--guidance-scale", type=float, default=DEFAULT_GUIDANCE_SCALE)
     p2.add_argument("--live", action="store_true")
+    p2.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    p2.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     p_all = sub.add_parser("submit-all")
     p_all.add_argument("--plan-json", required=True)
     p_all.add_argument("--output-dir", required=True)
     p_all.add_argument("--model", default=DEFAULT_MODEL)
     p_all.add_argument("--guidance-scale", type=float, default=DEFAULT_GUIDANCE_SCALE)
     p_all.add_argument("--live", action="store_true")
+    p_all.add_argument("--allow-sorted-seed-fallback", action="store_true")
+    p_all.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     args = parser.parse_args()
     if args.command == "plan":
-        plan = build_plan(args.audio, args.seed_dir, args.output, args.resolution, args.max_scenes, args.scene_seconds, args.start_offset_seconds, args.beat_align)
+        plan = build_plan(
+            args.audio,
+            args.seed_dir,
+            args.output,
+            args.resolution,
+            args.max_scenes,
+            args.scene_seconds,
+            args.start_offset_seconds,
+            args.beat_align,
+            allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
+        )
         print("LTX scene plan created.")
         print(Path(args.output).resolve())
         print(f"Seed images found: {plan.get('seed_image_count')}")
         print(f"Scene count: {plan['scene_count']}")
         print(f"Scene count source: {plan.get('scene_count_source')}")
+        print(f"Seed mapping status: {plan.get('seed_mapping', {}).get('status')}")
         print(json.dumps(plan["analysis"], indent=2))
     elif args.command == "preflight":
-        report = run_preflight(args.plan_json, args.output)
+        report = run_preflight(
+            args.plan_json,
+            args.output,
+            allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
+        )
         print(f"Preflight status: {report['status']}")
         print(f"Scene count: {report['scene_count']}")
         for problem in report["problems"]:
@@ -601,13 +766,32 @@ def main():
         if args.output:
             print(Path(args.output).resolve())
     elif args.command == "submit-one":
-        result = submit_one(args.plan_json, args.output, args.clip_index, args.model, args.guidance_scale, dry_run=not args.live, live=args.live)
+        result = submit_one(
+            args.plan_json,
+            args.output,
+            args.clip_index,
+            args.model,
+            args.guidance_scale,
+            dry_run=not args.live,
+            live=args.live,
+            allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
+        )
         print("LTX scene submit complete.")
         print(Path(args.output).resolve())
         print(f"Status: {result.get('status')}")
         print(f"Downloaded MP4: {result.get('downloaded_mp4')}")
     elif args.command == "submit-all":
-        summary = submit_all(args.plan_json, args.output_dir, args.model, args.guidance_scale, dry_run=not args.live, live=args.live)
+        summary = submit_all(
+            args.plan_json,
+            args.output_dir,
+            args.model,
+            args.guidance_scale,
+            dry_run=not args.live,
+            live=args.live,
+            allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
+        )
         print("LTX submit-all complete.")
         print(f"Status: {summary['status']}")
         print(f"Scenes: {len(summary['results'])}")
