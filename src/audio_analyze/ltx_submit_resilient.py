@@ -6,10 +6,11 @@ import time
 import traceback
 
 from .ltx_holy_cheeks_pipeline import read_json, submit_one, safe_name
+from .path_policy import resolve_runtime_path, serialize_path
 
 
-DEFAULT_PLAN = "outputs\\ltx_video_run\\holy_cheeks_ltx_plan.json"
-DEFAULT_OUTPUT_DIR = "outputs\\ltx_video_run"
+DEFAULT_PLAN = "outputs/ltx_video_run/holy_cheeks_ltx_plan.json"
+DEFAULT_OUTPUT_DIR = "outputs/ltx_video_run"
 DEFAULT_MODEL = "ltx-2-3-pro"
 DEFAULT_GUIDANCE_SCALE = 9.0
 FINGERPRINT_SCHEMA = "ltx.submit_resilient.clip_fingerprint.v1"
@@ -33,13 +34,13 @@ FINGERPRINT_FIELDS = [
 
 
 def write_json(path, data):
-    path = Path(path)
+    path = resolve_runtime_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def expected_mp4_path(output_dir, item):
-    downloads = Path(output_dir) / "downloads"
+    downloads = resolve_runtime_path(output_dir) / "downloads"
     file_stem = safe_name(item.get("file_stem", "ltx_output"))
     clip_index = int(item["clip_index"])
     return downloads / f"{file_stem}_ltx_scene_{clip_index:02d}.mp4"
@@ -89,9 +90,12 @@ def validate_existing_clip(output_dir, item, result_path, model=DEFAULT_MODEL, g
     expected = clip_fingerprint(item, model=model, guidance_scale=guidance_scale)
     base = {
         "expected_fingerprint": expected,
-        "mp4_path": str(mp4_path.resolve()),
-        "metadata_json": str(metadata_path.resolve()),
-        "result_json": str(Path(result_path).resolve()),
+        "mp4_path": serialize_path(mp4_path),
+        "mp4_resolved_path": str(mp4_path.resolve()),
+        "metadata_json": serialize_path(metadata_path),
+        "metadata_resolved_path": str(metadata_path.resolve()),
+        "result_json": serialize_path(result_path),
+        "result_resolved_path": str(resolve_runtime_path(result_path).resolve()),
     }
 
     if not mp4_path.exists():
@@ -170,8 +174,10 @@ def write_clip_metadata(output_dir, item, result_path, result, model=DEFAULT_MOD
         "file_stem": item.get("file_stem"),
         "model": model,
         "guidance_scale": float(guidance_scale),
-        "mp4_path": str(mp4_path.resolve()),
-        "result_json": str(Path(result_path).resolve()),
+        "mp4_path": serialize_path(mp4_path),
+        "mp4_resolved_path": str(mp4_path.resolve()),
+        "result_json": serialize_path(result_path),
+        "result_resolved_path": str(resolve_runtime_path(result_path).resolve()),
         "downloaded_mp4": result.get("downloaded_mp4"),
         "status": result.get("status"),
     }
@@ -194,7 +200,7 @@ def submit_resilient(
     allow_duplicate_seed_reuse=False,
 ):
     plan = read_json(plan_json)
-    output_dir = Path(output_dir)
+    output_dir = resolve_runtime_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / "ltx_submit_resilient_summary.json"
 
@@ -202,8 +208,10 @@ def submit_resilient(
         "status": "running",
         "live": bool(live),
         "dry_run": not bool(live),
-        "plan_json": str(Path(plan_json).resolve()),
-        "output_dir": str(output_dir.resolve()),
+        "plan_json": serialize_path(plan_json),
+        "plan_json_resolved": str(resolve_runtime_path(plan_json).resolve()),
+        "output_dir": serialize_path(output_dir),
+        "output_dir_resolved": str(output_dir.resolve()),
         "retries": int(retries),
         "retry_sleep_seconds": float(retry_sleep_seconds),
         "only_missing": bool(only_missing),
@@ -229,8 +237,10 @@ def submit_resilient(
                 row = {
                     "clip_index": idx,
                     "status": "skipped_existing",
-                    "downloaded_mp4": str(mp4_path.resolve()),
-                    "result_json": str(result_path.resolve()),
+                    "downloaded_mp4": serialize_path(mp4_path),
+                    "downloaded_mp4_resolved": str(mp4_path.resolve()),
+                    "result_json": serialize_path(result_path),
+                    "result_resolved_path": str(result_path.resolve()),
                     "clip_fingerprint": validation["expected_fingerprint"],
                     "fingerprint_validation": validation,
                 }
@@ -242,8 +252,10 @@ def submit_resilient(
 
             stale_detail = {
                 "clip_index": idx,
-                "mp4_path": str(mp4_path.resolve()),
-                "result_json": str(result_path.resolve()),
+                "mp4_path": serialize_path(mp4_path),
+                "mp4_resolved_path": str(mp4_path.resolve()),
+                "result_json": serialize_path(result_path),
+                "result_resolved_path": str(result_path.resolve()),
                 "fingerprint_validation": validation,
                 "reason": validation["reason"],
             }
@@ -256,7 +268,8 @@ def submit_resilient(
                     "clip_index": idx,
                     "status": "would_resubmit_stale",
                     "downloaded_mp4": None,
-                    "result_json": str(result_path.resolve()),
+                    "result_json": serialize_path(result_path),
+                    "result_resolved_path": str(result_path.resolve()),
                     "clip_fingerprint": validation["expected_fingerprint"],
                     "fingerprint_validation": validation,
                     "stale_existing": True,
@@ -294,8 +307,14 @@ def submit_resilient(
                     "status": result.get("status"),
                     "scene_audio_path": result.get("scene_audio_path"),
                     "scene_audio_format": result.get("scene_audio_format"),
-                    "downloaded_mp4": result.get("downloaded_mp4"),
-                    "result_json": str(result_path.resolve()),
+                    "downloaded_mp4": serialize_path(result["downloaded_mp4"]) if result.get("downloaded_mp4") else None,
+                    "downloaded_mp4_resolved_path": (
+                        str(resolve_runtime_path(result["downloaded_mp4"]).resolve())
+                        if result.get("downloaded_mp4")
+                        else None
+                    ),
+                    "result_json": serialize_path(result_path),
+                    "result_resolved_path": str(result_path.resolve()),
                     "metadata_json": metadata_path,
                     "clip_fingerprint": result.get("clip_fingerprint"),
                     "attempts": attempt,
@@ -322,7 +341,8 @@ def submit_resilient(
             summary["results"].append({
                 "clip_index": idx,
                 "status": "failed",
-                "result_json": str(result_path.resolve()),
+                "result_json": serialize_path(result_path),
+                "result_resolved_path": str(result_path.resolve()),
                 "error": last_error["error"],
             })
             summary["failed_scenes"].append(idx)

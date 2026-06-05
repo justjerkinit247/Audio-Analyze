@@ -13,9 +13,11 @@ import soundfile as sf
 try:
     from .ltx_client import LTXClient, LTXError
     from .ltx_seed_mapper import collect_labeled_seed_images, expected_scene_mapping_key, validate_seed_mapping
+    from .path_policy import is_windows_absolute_path, resolve_runtime_path, serialize_path, validate_path_config
 except ImportError:
     from ltx_client import LTXClient, LTXError
     from ltx_seed_mapper import collect_labeled_seed_images, expected_scene_mapping_key, validate_seed_mapping
+    from path_policy import is_windows_absolute_path, resolve_runtime_path, serialize_path, validate_path_config
 
 
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp"}
@@ -30,9 +32,9 @@ MAX_GUIDANCE_SCALE = 20.0
 DEFAULT_SCENE_SECONDS = 8.0
 DEFAULT_MODEL = "ltx-2-3-pro"
 DEFAULT_GUIDANCE_SCALE = 9.0
-DEFAULT_AUDIO = "inputs\\audio\\hop out the whip.mp3"
-DEFAULT_PLAN_JSON = "outputs\\ltx_video_run\\holy_cheeks_ltx_plan.json"
-DEFAULT_SEED_DIR = "inputs\\ltx_seed_images"
+DEFAULT_AUDIO = "inputs/audio/hop out the whip.mp3"
+DEFAULT_PLAN_JSON = "outputs/ltx_video_run/holy_cheeks_ltx_plan.json"
+DEFAULT_SEED_DIR = "inputs/ltx_seed_images"
 
 SEED_HINT_STOP_TOKENS = {
     "seed", "image", "img", "ltx", "scene", "clip", "final", "new", "v1", "v2", "v3",
@@ -46,13 +48,13 @@ LTX_AUDIO_EXPORT_CANDIDATES = [
 
 
 def write_json(path, data):
-    path = Path(path)
+    path = resolve_runtime_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    return json.loads(resolve_runtime_path(path).read_text(encoding="utf-8-sig"))
 
 
 def scalarize(value):
@@ -81,7 +83,7 @@ def seed_filename_hint(seed_image):
 
 
 def list_seed_images(seed_dir):
-    seed_dir = Path(seed_dir)
+    seed_dir = resolve_runtime_path(seed_dir)
     if not seed_dir.exists():
         raise FileNotFoundError(f"Seed image folder not found: {seed_dir.resolve()}")
     images = sorted(p for p in seed_dir.iterdir() if p.is_file() and p.suffix.lower() in ALLOWED_IMAGES)
@@ -268,7 +270,7 @@ def build_plan(
     allow_sorted_seed_fallback=False,
     allow_duplicate_seed_reuse=False,
 ):
-    audio_path = Path(audio_path)
+    audio_path = resolve_runtime_path(audio_path)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path.resolve()}")
     images = list_seed_images(seed_dir)
@@ -301,7 +303,7 @@ def build_plan(
         else:
             image = None
             seed_mapping_method = "missing"
-        seed_path = str(image.resolve()) if image else ""
+        seed_path = serialize_path(image) if image else ""
         seed_hint = seed_filename_hint(image) if image else ""
         seed_assignment = {
             "method": seed_mapping_method,
@@ -315,7 +317,7 @@ def build_plan(
         results.append({
             "clip_index": idx,
             "file_stem": audio_path.stem,
-            "source_audio_path": str(audio_path.resolve()),
+            "source_audio_path": serialize_path(audio_path),
             "seed_image_used": seed_path,
             "seed_filename_prompt_hint": seed_hint,
             "seed_assignment": seed_assignment,
@@ -359,7 +361,8 @@ def build_plan(
     )
     plan["seed_mapping"] = {
         **seed_mapping_report,
-        "seed_dir": str(Path(seed_dir).resolve()),
+        "seed_dir": serialize_path(seed_dir),
+        "seed_dir_resolved": str(resolve_runtime_path(seed_dir).resolve()),
         "source": "build_plan",
         "assignments": seed_assignments,
         "label_examples": [
@@ -404,14 +407,21 @@ def _validate_media_path(problems, clip_index, field, value, allowed_exts):
         problems.append(validation_problem(clip_index, field, "path is required"))
         return
     try:
-        path = Path(value)
+        path = resolve_runtime_path(value)
     except TypeError:
         problems.append(validation_problem(clip_index, field, "path must be a string"))
         return
     if path.suffix.lower() not in allowed_exts:
         problems.append(validation_problem(clip_index, field, f"unsupported extension '{path.suffix}'"))
     if not path.exists():
-        problems.append(validation_problem(clip_index, field, f"file missing: {path}"))
+        reason = (
+            "file missing: stale absolute local media path is missing"
+            if is_windows_absolute_path(value)
+            else "file missing"
+        )
+        problems.append(
+            validation_problem(clip_index, field, f"{reason}: {value}; resolved_path={path.resolve()}")
+        )
         return
     if path.stat().st_size <= 0:
         problems.append(validation_problem(clip_index, field, f"file is empty: {path}"))
@@ -502,6 +512,7 @@ def run_preflight(
 ):
     plan = read_json(plan_json)
     seed_mapping_report = None
+    path_policy_report = validate_path_config(plan)
     problems = validate_plan(plan)
     if require_seed_mapping:
         seed_mapping_report = validate_seed_mapping(
@@ -515,7 +526,9 @@ def run_preflight(
         "status": "FAILED" if problems else "PASSED",
         "scene_count": len(plan.get("results", [])),
         "problems": problems,
-        "plan_json": str(Path(plan_json).resolve()),
+        "plan_json": serialize_path(plan_json),
+        "plan_json_resolved": str(resolve_runtime_path(plan_json).resolve()),
+        "path_policy": path_policy_report,
         "seed_mapping_validation": seed_mapping_report,
     }
     if output_json:
@@ -531,9 +544,9 @@ def export_audio_candidate(path, y, sr, candidate):
 
 
 def export_scene_audio(source_audio_path, scene, output_dir, file_stem, clip_index):
-    output_dir = Path(output_dir)
+    output_dir = resolve_runtime_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    source_audio_path = Path(source_audio_path)
+    source_audio_path = resolve_runtime_path(source_audio_path)
     start = float(scene["start"])
     end = float(scene["end"])
     duration = max(MIN_LTX_AUDIO_SECONDS, min(MAX_LTX_AUDIO_SECONDS, end - start))
@@ -547,7 +560,12 @@ def export_scene_audio(source_audio_path, scene, output_dir, file_stem, clip_ind
         scene_audio = output_dir / f"{safe_name(file_stem)}_ltx_scene_{int(clip_index):02d}{candidate['extension']}"
         try:
             export_audio_candidate(scene_audio, y, sr, candidate)
-            return {"path": str(scene_audio.resolve()), "format": candidate["format"], "extension": candidate["extension"]}
+            return {
+                "path": serialize_path(scene_audio),
+                "resolved_path": str(scene_audio.resolve()),
+                "format": candidate["format"],
+                "extension": candidate["extension"],
+            }
         except Exception as exc:
             errors.append(f"{candidate['format']} failed: {exc}")
             try:
@@ -597,7 +615,9 @@ def submit_one(
         raise RuntimeError("Preflight failed; refusing submit. Problems:\n" + "\n".join(problems))
 
     match = _get_plan_item(plan, clip_index)
-    output_root = Path(output_json).parent
+    source_audio_path = resolve_runtime_path(match["source_audio_path"])
+    seed_image_path = resolve_runtime_path(match["seed_image_used"])
+    output_root = resolve_runtime_path(output_json).parent
     downloads_dir = output_root / "downloads"
     scene_audio_dir = output_root / "scene_audio"
     downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -607,22 +627,26 @@ def submit_one(
         "clip_index": int(clip_index), "file_stem": match["file_stem"], "scene": match["scene"],
         "seed_image_used": match["seed_image_used"], "seed_filename_prompt_hint": match.get("seed_filename_prompt_hint"),
         "source_audio_path": match["source_audio_path"], "prompt_text": match["prompt_text"], "resolution": match["resolution"],
+        "seed_image_resolved_path": str(seed_image_path.resolve()),
+        "source_audio_resolved_path": str(source_audio_path.resolve()),
         "model": model, "guidance_scale": guidance_scale, "dry_run": dry_run, "live": live,
         "status": "submitting" if live else "dry_run", "audio_to_video_confirmed": True,
     }
     write_json(output_json, result)
 
     try:
-        scene_audio = export_scene_audio(match["source_audio_path"], match["scene"], scene_audio_dir, match["file_stem"], clip_index)
+        scene_audio = export_scene_audio(source_audio_path, match["scene"], scene_audio_dir, match["file_stem"], clip_index)
         scene_audio_path = scene_audio["path"]
+        scene_audio_resolved_path = scene_audio["resolved_path"]
         mp4_path = downloads_dir / f"{safe_name(match['file_stem'])}_ltx_scene_{int(clip_index):02d}.mp4"
         result["scene_audio_path"] = scene_audio_path
+        result["scene_audio_resolved_path"] = scene_audio_resolved_path
         result["scene_audio_format"] = scene_audio["format"]
         write_json(output_json, result)
         client = LTXClient(api_key="dry-run-key" if dry_run else None)
         ltx_result = client.audio_to_video(
-            audio_uri=scene_audio_path,
-            image_uri=match["seed_image_used"],
+            audio_uri=scene_audio_resolved_path,
+            image_uri=str(seed_image_path),
             prompt=match["prompt_text"],
             output_path=str(mp4_path),
             model=model,
@@ -632,7 +656,9 @@ def submit_one(
         )
         result["ltx_result"] = ltx_result
         result["status"] = ltx_result.get("status", "complete")
-        result["downloaded_mp4"] = ltx_result.get("downloaded_mp4")
+        downloaded_mp4 = ltx_result.get("downloaded_mp4")
+        result["downloaded_mp4"] = serialize_path(downloaded_mp4) if downloaded_mp4 else None
+        result["downloaded_mp4_resolved_path"] = str(resolve_runtime_path(downloaded_mp4).resolve()) if downloaded_mp4 else None
     except Exception as exc:
         result["status"] = "failed"
         result["error_type"] = type(exc).__name__
@@ -659,9 +685,16 @@ def submit_all(
     allow_duplicate_seed_reuse=False,
 ):
     plan = read_json(plan_json)
-    output_dir = Path(output_dir)
+    output_dir = resolve_runtime_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    summary = {"status": "running", "dry_run": dry_run, "live": live, "plan_json": str(Path(plan_json).resolve()), "results": []}
+    summary = {
+        "status": "running",
+        "dry_run": dry_run,
+        "live": live,
+        "plan_json": serialize_path(plan_json),
+        "plan_json_resolved": str(resolve_runtime_path(plan_json).resolve()),
+        "results": [],
+    }
     summary_path = output_dir / "ltx_submit_all_summary.json"
     write_json(summary_path, summary)
     failed_count = 0
@@ -685,7 +718,10 @@ def submit_all(
             "clip_index": idx, "status": result.get("status"), "failure_class": result.get("failure_class"),
             "retry_recommended": result.get("retry_recommended"), "error": result.get("error"),
             "scene_audio_path": result.get("scene_audio_path"), "scene_audio_format": result.get("scene_audio_format"),
-            "downloaded_mp4": result.get("downloaded_mp4"), "result_json": str(result_path.resolve()),
+            "downloaded_mp4": result.get("downloaded_mp4"),
+            "downloaded_mp4_resolved_path": result.get("downloaded_mp4_resolved_path"),
+            "result_json": serialize_path(result_path),
+            "result_resolved_path": str(result_path.resolve()),
         })
         summary["failed_count"] = failed_count
         write_json(summary_path, summary)

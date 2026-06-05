@@ -5,13 +5,14 @@ import json
 from .ltx_seed_mapper import apply_seed_mapping, read_json, write_json, make_preview_report
 from .ltx_holy_cheeks_pipeline import run_preflight
 from .ltx_prompt_maximizer import maximize_plan_prompts, DEFAULT_PROMPT_MAX_CHARS, DEFAULT_PROMPT_TARGET_CHARS
+from .path_policy import resolve_runtime_path, serialize_path
 
 
-DEFAULT_PLAN = "outputs\\ltx_video_run\\holy_cheeks_ltx_plan.json"
-DEFAULT_SEED_DIR = "inputs\\ltx_seed_images"
-DEFAULT_PREVIEW = "outputs\\ltx_video_run\\scene_control_preview.md"
-DEFAULT_PREFLIGHT = "outputs\\ltx_video_run\\preflight_report.json"
-DEFAULT_STATUS = "outputs\\ltx_video_run\\scene_control_status.json"
+DEFAULT_PLAN = "outputs/ltx_video_run/holy_cheeks_ltx_plan.json"
+DEFAULT_SEED_DIR = "inputs/ltx_seed_images"
+DEFAULT_PREVIEW = "outputs/ltx_video_run/scene_control_preview.md"
+DEFAULT_PREFLIGHT = "outputs/ltx_video_run/preflight_report.json"
+DEFAULT_STATUS = "outputs/ltx_video_run/scene_control_status.json"
 
 
 def build_scene_control_status(plan_json, preflight_report, output_json):
@@ -25,8 +26,10 @@ def build_scene_control_status(plan_json, preflight_report, output_json):
 
     status = {
         "status": "PASSED" if not problems and preflight.get("status") == "PASSED" else "NEEDS_ATTENTION",
-        "plan_json": str(Path(plan_json).resolve()),
-        "preflight_report": str(Path(preflight_report).resolve()),
+        "plan_json": serialize_path(plan_json),
+        "plan_json_resolved": str(resolve_runtime_path(plan_json).resolve()),
+        "preflight_report": serialize_path(preflight_report),
+        "preflight_report_resolved": str(resolve_runtime_path(preflight_report).resolve()),
         "scene_count": len(results),
         "mapping_problem_count": len(mapping.get("problems", [])),
         "mapping_status": mapping.get("status"),

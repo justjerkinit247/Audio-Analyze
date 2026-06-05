@@ -4,6 +4,11 @@ from collections import defaultdict
 import json
 import re
 
+try:
+    from .path_policy import is_windows_absolute_path, resolve_runtime_path, serialize_path
+except ImportError:
+    from path_policy import is_windows_absolute_path, resolve_runtime_path, serialize_path
+
 
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp"}
 EXPLICIT_SEED_METHODS = {"scene_label", "manifest_seed_file"}
@@ -27,11 +32,11 @@ STOP_TOKENS = {
 
 
 def read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    return json.loads(resolve_runtime_path(path).read_text(encoding="utf-8-sig"))
 
 
 def write_json(path, data):
-    path = Path(path)
+    path = resolve_runtime_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -103,7 +108,7 @@ def load_scene_manifest(manifest_path):
 
 
 def collect_labeled_seed_images(seed_dir):
-    seed_dir = Path(seed_dir)
+    seed_dir = resolve_runtime_path(seed_dir)
     if not seed_dir.exists():
         raise FileNotFoundError(f"Seed image folder not found: {seed_dir.resolve()}")
 
@@ -135,7 +140,7 @@ def _seed_problem(clip_index, expected_key, reason, seed_path=None):
 
 
 def _path_key(path):
-    return str(Path(path).resolve()).lower()
+    return str(resolve_runtime_path(path).resolve()).lower()
 
 
 def validate_seed_mapping(
@@ -164,7 +169,7 @@ def validate_seed_mapping(
         "problems": [],
     }
 
-    seed_dir_path = Path(seed_dir) if seed_dir else None
+    seed_dir_path = resolve_runtime_path(seed_dir) if seed_dir else None
     labeled = {}
     all_seed_files = []
     if seed_dir_path and seed_dir_path.exists():
@@ -196,7 +201,7 @@ def validate_seed_mapping(
             continue
 
         try:
-            seed_path = Path(seed_path_value)
+            seed_path = resolve_runtime_path(seed_path_value)
         except TypeError:
             detail = {
                 "clip_index": clip_index,
@@ -208,7 +213,8 @@ def validate_seed_mapping(
             report["problems"].append(_seed_problem(clip_index, expected_key, detail["reason"], seed_path_value))
             continue
 
-        seed_path_text = str(seed_path)
+        seed_path_text = serialize_path(seed_path)
+        seed_path_resolved = str(seed_path.resolve())
         report["mapped_scene_count"] += 1
 
         if not assignment:
@@ -276,12 +282,13 @@ def validate_seed_mapping(
                 )
 
         key = _path_key(seed_path)
-        mapped_paths[key] = str(seed_path.resolve())
+        mapped_paths[key] = seed_path_text
         mapped_path_to_scenes[key].append(
             {
                 "clip_index": clip_index,
                 "expected_key": expected_key,
-                "seed_image_path": str(seed_path.resolve()),
+                "seed_image_path": seed_path_text,
+                "seed_image_resolved_path": seed_path_resolved,
             }
         )
 
@@ -295,7 +302,7 @@ def validate_seed_mapping(
         for scene_number, paths in sorted(labeled.items()):
             if scene_number in planned_indexes and len(paths) > 1:
                 expected_key = expected_scene_mapping_key(scene_number)
-                candidates = [str(path.resolve()) for path in paths]
+                candidates = [serialize_path(path) for path in paths]
                 report["problems"].append(
                     _seed_problem(
                         scene_number,
@@ -307,7 +314,7 @@ def validate_seed_mapping(
         mapped_keys = set(mapped_paths)
         for seed_file in all_seed_files:
             if _path_key(seed_file) not in mapped_keys:
-                extra = str(seed_file.resolve())
+                extra = serialize_path(seed_file)
                 report["extra_seed_files"].append(extra)
                 report["warnings"].append(f"Seed mapping: extra seed image not mapped: {extra}")
 
@@ -335,10 +342,11 @@ def choose_manifest_seed(seed_dir, manifest_entry):
     requested = (manifest_entry or {}).get("seed_file")
     if not requested:
         return None
+    seed_dir = resolve_runtime_path(seed_dir)
     candidate = Path(requested)
-    if candidate.is_absolute() and candidate.exists():
+    if (candidate.is_absolute() or is_windows_absolute_path(requested)) and candidate.exists():
         return candidate
-    candidate = Path(seed_dir) / requested
+    candidate = seed_dir / requested
     if candidate.exists():
         return candidate
     return None
@@ -464,7 +472,7 @@ def apply_seed_mapping(
             scene_addon = build_scene_addon(seed_hint, manifest_entry, use_filename_hints=not no_filename_hints)
             if "base_prompt_text" not in item:
                 item["base_prompt_text"] = item.get("prompt_text", "")
-            item["seed_image_used"] = str(Path(chosen).resolve())
+            item["seed_image_used"] = serialize_path(chosen)
             item["prompt_text"] = rebuild_prompt(item.get("base_prompt_text", item.get("prompt_text", "")), scene_addon)
             if len(item["prompt_text"]) > PROMPT_MAX_CHARS:
                 problems.append(f"Scene {clip_index}: prompt is over {PROMPT_MAX_CHARS} characters after mapping")
@@ -500,9 +508,11 @@ def apply_seed_mapping(
 
     plan["seed_mapping"] = {
         **mapping_report,
-        "seed_dir": str(Path(seed_dir).resolve()),
+        "seed_dir": serialize_path(seed_dir),
+        "seed_dir_resolved": str(resolve_runtime_path(seed_dir).resolve()),
         "strict": strict,
-        "manifest_json": str(Path(manifest_json).resolve()) if manifest_json else None,
+        "manifest_json": serialize_path(manifest_json) if manifest_json else None,
+        "manifest_json_resolved": str(resolve_runtime_path(manifest_json).resolve()) if manifest_json else None,
         "filename_hints_enabled": not no_filename_hints,
         "assignments": assignments,
         "label_examples": [
@@ -553,17 +563,17 @@ def main():
 
     apply_parser = sub.add_parser("apply")
     apply_parser.add_argument("--plan-json", required=True)
-    apply_parser.add_argument("--seed-dir", default="inputs\\ltx_seed_images")
+    apply_parser.add_argument("--seed-dir", default="inputs/ltx_seed_images")
     apply_parser.add_argument("--output", default=None, help="Optional output plan path. If omitted, rewrites the input plan in place.")
     apply_parser.add_argument("--strict", action="store_true", help="Require every scene to have a labeled seed image.")
     apply_parser.add_argument("--allow-sorted-seed-fallback", action="store_true", help="Allow existing-plan or sorted seed fallback assignments.")
     apply_parser.add_argument("--allow-duplicate-seed-reuse", action="store_true", help="Allow the same seed image to be intentionally reused by multiple scenes.")
     apply_parser.add_argument("--manifest-json", default=None, help="Optional JSON file with per-scene prompt/camera/motion overrides.")
     apply_parser.add_argument("--no-filename-hints", action="store_true", help="Assign images by filename but do not inject filename words into prompt_text.")
-    apply_parser.add_argument("--preview-md", default="outputs\\ltx_video_run\\scene_control_preview.md")
+    apply_parser.add_argument("--preview-md", default="outputs/ltx_video_run/scene_control_preview.md")
 
     template_parser = sub.add_parser("template")
-    template_parser.add_argument("--output", default="inputs\\ltx_seed_images\\scene_manifest_template.json")
+    template_parser.add_argument("--output", default="inputs/ltx_seed_images/scene_manifest_template.json")
 
     args = parser.parse_args()
 

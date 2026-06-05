@@ -12,12 +12,14 @@ try:
         run_preflight,
         submit_all,
     )
+    from .path_policy import resolve_runtime_path, serialize_path
 except ImportError:
     from ltx_holy_cheeks_pipeline import (
         build_plan,
         run_preflight,
         submit_all,
     )
+    from path_policy import resolve_runtime_path, serialize_path
 
 
 DEFAULT_PLAN_JSON = "outputs/ltx_video_run/holy_cheeks_ltx_plan.json"
@@ -50,7 +52,7 @@ def timestamp():
 
 
 def write_json(path, data):
-    path = Path(path)
+    path = resolve_runtime_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -63,7 +65,7 @@ def scalar(value):
 
 
 def extract_beat_markers(audio_path, plan):
-    audio_path = Path(audio_path)
+    audio_path = resolve_runtime_path(audio_path)
     y, sr = librosa.load(str(audio_path), sr=None, mono=True)
     duration = float(librosa.get_duration(y=y, sr=sr))
     onset_env = librosa.onset.onset_strength(y=y, sr=sr)
@@ -105,7 +107,8 @@ def extract_beat_markers(audio_path, plan):
 
     return {
         "status": "analyzed",
-        "audio_path": str(audio_path.resolve()),
+        "audio_path": serialize_path(audio_path),
+        "audio_resolved_path": str(audio_path.resolve()),
         "duration_seconds": round(duration, 3),
         "tempo_bpm": round(tempo, 3) if tempo else None,
         "beat_count": len(beat_times),
@@ -275,7 +278,7 @@ def build_stitching_manifest(plan, submit_summary):
 
 
 def write_orchestration_manifests(plan, preflight, submit_summary, output_dir, audio_path):
-    output_dir = Path(output_dir)
+    output_dir = resolve_runtime_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     beat_markers = extract_beat_markers(audio_path, plan)
@@ -301,7 +304,7 @@ def write_orchestration_manifests(plan, preflight, submit_summary, output_dir, a
     write_json(paths["retry_queue"], retry_queue)
     write_json(paths["stitching_manifest"], stitching)
 
-    return {name: str(path.resolve()) for name, path in paths.items()}
+    return {name: serialize_path(path) for name, path in paths.items()}
 
 
 def orchestrate(
@@ -380,6 +383,10 @@ def orchestrate(
         output_dir=DEFAULT_ORCHESTRATION_DIR,
         audio_path=audio,
     )
+    manifest_paths_resolved = {
+        name: str(resolve_runtime_path(path).resolve())
+        for name, path in manifest_paths.items()
+    }
 
     final_status = "complete" if preflight["status"] == "PASSED" else "failed_preflight"
     result = {
@@ -390,14 +397,18 @@ def orchestrate(
         "beat_alignment_enabled": plan.get("beat_alignment_enabled"),
         "audio_to_video_enabled": plan.get("audio_to_video_enabled"),
         "audio_plus_seed_image_sent_to_ltx": plan.get("audio_plus_seed_image_sent_to_ltx"),
-        "plan_json": str(Path(output_plan).resolve()),
-        "preflight_json": str(Path(DEFAULT_PREFLIGHT_JSON).resolve()),
-        "submit_dir": str(Path(DEFAULT_SUBMIT_DIR).resolve()),
+        "plan_json": serialize_path(output_plan),
+        "plan_json_resolved": str(resolve_runtime_path(output_plan).resolve()),
+        "preflight_json": serialize_path(DEFAULT_PREFLIGHT_JSON),
+        "preflight_json_resolved": str(resolve_runtime_path(DEFAULT_PREFLIGHT_JSON).resolve()),
+        "submit_dir": serialize_path(DEFAULT_SUBMIT_DIR),
+        "submit_dir_resolved": str(resolve_runtime_path(DEFAULT_SUBMIT_DIR).resolve()),
         "manifest_paths": manifest_paths,
+        "manifest_paths_resolved": manifest_paths_resolved,
         "summary": submit_summary,
     }
 
-    final_report = Path(report_json or DEFAULT_ORCHESTRATOR_REPORT_JSON)
+    final_report = resolve_runtime_path(report_json or DEFAULT_ORCHESTRATOR_REPORT_JSON)
     final_report.parent.mkdir(parents=True, exist_ok=True)
     final_report.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
