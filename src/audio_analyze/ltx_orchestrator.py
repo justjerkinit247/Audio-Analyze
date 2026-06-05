@@ -39,7 +39,7 @@ CAMERA_PROFILES = [
 
 CHOREOGRAPHY_PROFILES = [
     "confident beat-synced movement, subtle shoulder and hip groove on the downbeat",
-    "over-shoulder glance timed to a vocal, kick, or snare accent",
+    "over-shoulder glance timed to a high-energy beat-grid target",
     "brief polished hip-accent choreography, rhythmic and performance-art focused",
     "group movement continues with synchronized lower-body accents and stable spacing",
     "camera-readable performance energy, controlled hand placement, no anatomy drift",
@@ -64,6 +64,15 @@ def scalar(value):
     return float(arr.reshape(-1)[0])
 
 
+def select_high_beat_grid_targets(beat_items, limit=8):
+    """Pick the highest-energy detected beats, then return them in timeline order."""
+    if not beat_items:
+        return [], []
+    ranked = sorted(beat_items, key=lambda item: item["strength"], reverse=True)[:limit]
+    selected = sorted(ranked, key=lambda item: item["time"])
+    return [item["time"] for item in selected], [item["strength"] for item in selected]
+
+
 def extract_beat_markers(audio_path, plan):
     audio_path = resolve_runtime_path(audio_path)
     y, sr = librosa.load(str(audio_path), sr=None, mono=True)
@@ -73,6 +82,15 @@ def extract_beat_markers(audio_path, plan):
     tempo = scalar(tempo_raw)
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
     onset_times = librosa.times_like(onset_env, sr=sr)
+
+    beat_grid = []
+    for frame, beat_time in zip(beat_frames, beat_times):
+        frame_index = int(frame)
+        strength = float(onset_env[frame_index]) if 0 <= frame_index < len(onset_env) else 0.0
+        beat_grid.append({
+            "time": round(float(beat_time), 3),
+            "strength": round(strength, 6),
+        })
 
     top_onsets = []
     if len(onset_env):
@@ -92,18 +110,24 @@ def extract_beat_markers(audio_path, plan):
         scene = item.get("scene", {})
         start = float(scene.get("start", 0.0))
         end = float(scene.get("end", start))
-        beats_in_scene = [round(float(t), 3) for t in beat_times if start <= float(t) <= end]
+        beat_items_in_scene = [item for item in beat_grid if start <= item["time"] <= end]
+        beats_in_scene = [item["time"] for item in beat_items_in_scene]
         onsets_in_scene = [round(float(t), 3) for t in top_onsets if start <= float(t) <= end]
+        high_beat_targets, high_beat_strengths = select_high_beat_grid_targets(beat_items_in_scene, limit=8)
+        primary_targets = high_beat_targets if high_beat_targets else onsets_in_scene[:8]
+        primary_source = "beat_grid_high_strengths" if high_beat_targets else "strong_onset_times_seconds"
         scene_markers.append({
             "clip_index": idx,
             "start": round(start, 3),
             "end": round(end, 3),
             "duration": round(max(0.0, end - start), 3),
             "beat_times_seconds": beats_in_scene,
+            "beat_grid_high_times_seconds": high_beat_targets,
+            "beat_grid_high_strengths": high_beat_strengths,
             "strong_onset_times_seconds": onsets_in_scene,
-            "primary_sync_targets_seconds": beats_in_scene[:8] if beats_in_scene else onsets_in_scene[:8],
-            "primary_sync_source": "beat_times_seconds" if beats_in_scene else "strong_onset_times_seconds",
-            "sync_density": len(beats_in_scene) if beats_in_scene else len(onsets_in_scene),
+            "primary_sync_targets_seconds": primary_targets,
+            "primary_sync_source": primary_source,
+            "sync_density": len(primary_targets),
         })
 
     return {
@@ -115,6 +139,7 @@ def extract_beat_markers(audio_path, plan):
         "beat_count": len(beat_times),
         "strong_onset_count": len(top_onsets),
         "beat_times_seconds": [round(float(t), 3) for t in beat_times],
+        "beat_grid": beat_grid,
         "strong_onset_times_seconds": top_onsets,
         "scenes": scene_markers,
     }
@@ -170,14 +195,17 @@ def build_beat_camera_choreography_manifest(plan, beat_markers=None):
             "duration": scene.get("duration"),
             "tempo_bpm": tempo,
             "beat_alignment_enabled": bool(plan.get("beat_alignment_enabled")),
-            "beat_sync_rule": "Prioritize visible motion accents on beat-grid targets; use strong onsets only as secondary emphasis.",
+            "beat_sync_rule": "Prioritize visible movement only on high-energy beat-grid targets; use off-grid strong onsets only as secondary emphasis, not primary timing.",
             "primary_sync_targets_seconds": markers.get("primary_sync_targets_seconds", []),
             "primary_sync_source": markers.get("primary_sync_source"),
+            "beat_grid_high_times_seconds": markers.get("beat_grid_high_times_seconds", []),
+            "beat_grid_high_strengths": markers.get("beat_grid_high_strengths", []),
             "sync_density": markers.get("sync_density"),
             "camera_profile": camera,
             "choreography_profile": choreography,
             "negative_motion_rules": [
                 "no off-beat random shaking",
+                "no constant motion on every beat",
                 "no chaotic camera spin",
                 "no warped anatomy",
                 "no random background or body layout mutation",
@@ -203,13 +231,13 @@ def build_sync_score_manifest(plan, beat_markers):
         density_per_second = density / max(duration, 0.001)
         if density_per_second >= 2.0:
             difficulty = "high"
-            recommendation = "Use fewer, stronger visible accents; avoid constant motion chaos."
+            recommendation = "Use fewer, stronger visible accents; movement should hit selected high-energy beat-grid targets, not every beat."
         elif density_per_second >= 1.0:
             difficulty = "medium"
-            recommendation = "Use clear downbeat and snare accents with controlled camera emphasis."
+            recommendation = "Use controlled movement hits on selected high-energy beat-grid targets."
         else:
             difficulty = "low"
-            recommendation = "Use broader groove movement and hold stable camera continuity."
+            recommendation = "Use broader groove movement and hold stable camera continuity between selected beat-grid targets."
         scores.append({
             "clip_index": scene.get("clip_index"),
             "duration": duration,
