@@ -1,6 +1,7 @@
 from pathlib import Path
 import argparse
 import json
+import math
 import os
 import re
 import traceback
@@ -16,9 +17,14 @@ except ImportError:
 
 
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_AUDIO = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".aiff", ".aif"}
+ALLOWED_LTX_MODELS = {"ltx-2-3-pro"}
 RESOLUTION_MAP = {"9:16": "1080x1920", "16:9": "1920x1080", "1:1": "1080x1080"}
 MIN_LTX_AUDIO_SECONDS = 2.0
 MAX_LTX_AUDIO_SECONDS = 20.0
+PROMPT_MAX_CHARS = 5000
+MIN_GUIDANCE_SCALE = 0.0
+MAX_GUIDANCE_SCALE = 20.0
 DEFAULT_SCENE_SECONDS = 8.0
 DEFAULT_MODEL = "ltx-2-3-pro"
 DEFAULT_GUIDANCE_SCALE = 9.0
@@ -303,30 +309,105 @@ def build_plan(audio_path, seed_dir, output_json, resolution="9:16", max_scenes=
     return plan
 
 
-def validate_plan(plan):
+def validation_problem(clip_index, field, reason):
+    return f"Scene {clip_index}: {field}: {reason}"
+
+
+def _positive_int(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, float) and not value.is_integer():
+            return None
+        parsed = int(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _numeric_guidance_scale(value):
+    try:
+        if isinstance(value, bool):
+            return None
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _validate_media_path(problems, clip_index, field, value, allowed_exts):
+    if value is None or not str(value).strip():
+        problems.append(validation_problem(clip_index, field, "path is required"))
+        return
+    try:
+        path = Path(value)
+    except TypeError:
+        problems.append(validation_problem(clip_index, field, "path must be a string"))
+        return
+    if path.suffix.lower() not in allowed_exts:
+        problems.append(validation_problem(clip_index, field, f"unsupported extension '{path.suffix}'"))
+    if not path.exists():
+        problems.append(validation_problem(clip_index, field, f"file missing: {path}"))
+        return
+    if path.stat().st_size <= 0:
+        problems.append(validation_problem(clip_index, field, f"file is empty: {path}"))
+
+
+def _validate_submit_settings(problems, clip_index, model=None, guidance_scale=None):
+    if model is not None and model not in ALLOWED_LTX_MODELS:
+        problems.append(validation_problem(clip_index, "model", f"unsupported model '{model}'"))
+    if guidance_scale is not None:
+        numeric = _numeric_guidance_scale(guidance_scale)
+        if numeric is None:
+            problems.append(validation_problem(clip_index, "guidance_scale", "must be numeric"))
+        elif numeric < MIN_GUIDANCE_SCALE or numeric > MAX_GUIDANCE_SCALE:
+            problems.append(
+                validation_problem(
+                    clip_index,
+                    "guidance_scale",
+                    f"must be between {MIN_GUIDANCE_SCALE:g} and {MAX_GUIDANCE_SCALE:g}",
+                )
+            )
+
+
+def validate_plan(plan, model=None, guidance_scale=None, clip_index=None):
     problems = []
     if not plan.get("results"):
         problems.append("Plan has no scene results.")
+    requested_clip_index = _positive_int(clip_index) if clip_index is not None else None
+    if clip_index is not None and requested_clip_index is None:
+        problems.append(validation_problem(clip_index, "clip_index", "must be a positive integer"))
+    if clip_index is not None and requested_clip_index is not None:
+        if not any(_positive_int(item.get("clip_index")) == requested_clip_index for item in plan.get("results", [])):
+            problems.append(validation_problem(requested_clip_index, "clip_index", "not found in plan results"))
     for item in plan.get("results", []):
-        idx = item.get("clip_index", "unknown")
-        audio_path = Path(item.get("source_audio_path", ""))
-        image_path = Path(item.get("seed_image_used", ""))
+        parsed_idx = _positive_int(item.get("clip_index"))
+        idx = parsed_idx if parsed_idx is not None else item.get("clip_index", "unknown")
+        if parsed_idx is None:
+            problems.append(validation_problem(idx, "clip_index", "must be a positive integer"))
+        if requested_clip_index is not None and parsed_idx != requested_clip_index:
+            continue
+        audio_path_value = item.get("source_audio_path", "")
+        image_path_value = item.get("seed_image_used", "")
         scene = item.get("scene", {})
-        duration = float(scene.get("duration", 0))
+        try:
+            duration = float(scene.get("duration", 0))
+        except Exception:
+            duration = 0.0
+            problems.append(validation_problem(idx, "scene.duration", "must be numeric"))
         prompt = item.get("prompt_text", "")
         resolution = item.get("resolution", "")
-        if not audio_path.exists():
-            problems.append(f"Scene {idx}: source audio missing: {audio_path}")
-        if not image_path.exists():
-            problems.append(f"Scene {idx}: seed image missing: {image_path}")
+        _validate_media_path(problems, idx, "source_audio_path", audio_path_value, ALLOWED_AUDIO)
+        _validate_media_path(problems, idx, "seed_image_used", image_path_value, ALLOWED_IMAGES)
         if duration < MIN_LTX_AUDIO_SECONDS or duration > MAX_LTX_AUDIO_SECONDS:
-            problems.append(f"Scene {idx}: audio duration {duration:.2f}s is outside {MIN_LTX_AUDIO_SECONDS}-{MAX_LTX_AUDIO_SECONDS}s.")
-        if not prompt.strip():
-            problems.append(f"Scene {idx}: prompt is empty.")
-        if len(prompt) > 5000:
-            problems.append(f"Scene {idx}: prompt is over 5000 characters.")
+            problems.append(validation_problem(idx, "scene.duration", f"{duration:.2f}s is outside {MIN_LTX_AUDIO_SECONDS}-{MAX_LTX_AUDIO_SECONDS}s"))
+        if prompt is None or not str(prompt).strip():
+            problems.append(validation_problem(idx, "prompt_text", "prompt is empty"))
+        if len(str(prompt)) > PROMPT_MAX_CHARS:
+            problems.append(validation_problem(idx, "prompt_text", f"prompt is over {PROMPT_MAX_CHARS} characters"))
         if resolution not in set(RESOLUTION_MAP.values()):
-            problems.append(f"Scene {idx}: resolution looks unsupported or unnormalized: {resolution}")
+            problems.append(validation_problem(idx, "resolution", f"unsupported or unnormalized value: {resolution}"))
+        _validate_submit_settings(problems, idx, model=model, guidance_scale=guidance_scale)
     return problems
 
 
@@ -390,7 +471,7 @@ def submit_one(plan_json, output_json, clip_index, model=DEFAULT_MODEL, guidance
         raise RuntimeError("LTXV_API_KEY is not set. Refusing live LTX call.")
 
     plan = read_json(plan_json)
-    problems = validate_plan(plan)
+    problems = validate_plan(plan, model=model, guidance_scale=guidance_scale, clip_index=clip_index)
     if problems:
         raise RuntimeError("Preflight failed; refusing submit. Problems:\n" + "\n".join(problems))
 
