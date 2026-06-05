@@ -101,8 +101,9 @@ def extract_beat_markers(audio_path, plan):
             "duration": round(max(0.0, end - start), 3),
             "beat_times_seconds": beats_in_scene,
             "strong_onset_times_seconds": onsets_in_scene,
-            "primary_sync_targets_seconds": onsets_in_scene[:8] if onsets_in_scene else beats_in_scene[:8],
-            "sync_density": len(onsets_in_scene) if onsets_in_scene else len(beats_in_scene),
+            "primary_sync_targets_seconds": beats_in_scene[:8] if beats_in_scene else onsets_in_scene[:8],
+            "primary_sync_source": "beat_times_seconds" if beats_in_scene else "strong_onset_times_seconds",
+            "sync_density": len(beats_in_scene) if beats_in_scene else len(onsets_in_scene),
         })
 
     return {
@@ -169,8 +170,9 @@ def build_beat_camera_choreography_manifest(plan, beat_markers=None):
             "duration": scene.get("duration"),
             "tempo_bpm": tempo,
             "beat_alignment_enabled": bool(plan.get("beat_alignment_enabled")),
-            "beat_sync_rule": "Prioritize visible motion accents on kick, snare, bass drops, vocal accents, and phrase transitions.",
+            "beat_sync_rule": "Prioritize visible motion accents on beat-grid targets; use strong onsets only as secondary emphasis.",
             "primary_sync_targets_seconds": markers.get("primary_sync_targets_seconds", []),
+            "primary_sync_source": markers.get("primary_sync_source"),
             "sync_density": markers.get("sync_density"),
             "camera_profile": camera,
             "choreography_profile": choreography,
