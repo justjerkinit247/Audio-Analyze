@@ -106,6 +106,33 @@ def configure_orchestrator(paths: RunPaths):
     return ltx_orchestrator
 
 
+def configure_scene_specific_plan_export(orchestrator):
+    from src.audio_analyze.clip_plan_export import write_clip_plans
+
+    original_build_plan = orchestrator.build_plan
+
+    def build_plan_with_scene_specific_prompts(*args, **kwargs):
+        plan = original_build_plan(*args, **kwargs)
+        output_json = kwargs.get("output_json")
+        if output_json is None and len(args) >= 3:
+            output_json = args[2]
+        if output_json is None:
+            output_json = orchestrator.DEFAULT_PLAN_JSON
+        clip_plan_files = write_clip_plans(output_json, plan)
+        Path(output_json).write_text(json.dumps(plan, indent=2), encoding="utf-8")
+        plan["clip_plan_export"] = {
+            "status": "complete",
+            "timing": "before_preflight_and_submit",
+            "clip_plan_count": len(clip_plan_files),
+            "clip_plan_json_files": clip_plan_files,
+        }
+        Path(output_json).write_text(json.dumps(plan, indent=2), encoding="utf-8")
+        return plan
+
+    orchestrator.build_plan = build_plan_with_scene_specific_prompts
+    return orchestrator
+
+
 def copy_final_video(paths: RunPaths) -> Optional[str]:
     if not paths.assembly_output.exists() or paths.assembly_output.stat().st_size <= 0:
         return None
@@ -174,6 +201,7 @@ def export_scene_clip_plans(plan_json: Path) -> dict[str, Any]:
     plan_json.write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return {
         "status": "complete",
+        "timing": "post_orchestrator_refresh_only",
         "clip_plan_dir": plan.get("clip_plan_dir"),
         "clip_plan_count": len(written),
         "clip_plan_json_files": written,
@@ -211,7 +239,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     run_id = slugify(args.run_id) if args.run_id else make_run_id(audio)
     paths = build_run_paths(run_id)
     ensure_run_dirs(paths)
-    orchestrator = configure_orchestrator(paths)
+    orchestrator = configure_scene_specific_plan_export(configure_orchestrator(paths))
 
     output_plan = Path(args.output_plan).resolve() if args.output_plan else paths.plan_json
     seed_dir = Path(args.seed_dir).resolve()
@@ -228,6 +256,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     print(f"Orchestrator report: {rel(paths.run_orchestrator_report)}")
     print(f"Start offset seconds: {args.start_offset_seconds}")
     print(f"Beat alignment enabled: {args.beat_align}")
+    print("Clip-specific prompt export: before preflight and submit")
 
     result = orchestrator.orchestrate(
         audio=str(audio),
@@ -249,7 +278,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
     clip_plan_report = None
     if output_plan.exists():
         clip_plan_report = export_scene_clip_plans(output_plan)
-        result["clip_plan_export"] = clip_plan_report
+        result["clip_plan_export_refresh"] = clip_plan_report
         paths.run_orchestrator_report.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     render_output_expected = bool(args.live or args.assemble_after)
