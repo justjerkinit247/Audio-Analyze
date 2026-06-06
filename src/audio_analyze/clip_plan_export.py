@@ -34,6 +34,19 @@ def _as_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
+def _format_seconds(value: Any, decimals: int = 3) -> str:
+    return f"{_as_float(value):.{decimals}f}s"
+
+
+def _cue_times_from_item(item: dict[str, Any]) -> list[float]:
+    sync_targets = item.get("sync_targets", {}) if isinstance(item.get("sync_targets"), dict) else {}
+    return [_as_float(value) for value in sync_targets.get("clip_local_seconds") or []]
+
+
+def format_cue_times(cue_times: list[Any]) -> str:
+    return ", ".join(f"{_as_float(value):.2f}s" for value in cue_times)
+
+
 def _scalar(value: Any) -> float:
     arr = np.asarray(value)
     if arr.size == 0:
@@ -106,47 +119,57 @@ def scene_specific_prompt_block(item: dict[str, Any]) -> str:
     scene = item.get("scene", {}) if isinstance(item.get("scene"), dict) else {}
     seed_assignment = item.get("seed_assignment", {}) if isinstance(item.get("seed_assignment"), dict) else {}
     seed_file = seed_assignment.get("seed_file") or Path(str(item.get("seed_image_used", ""))).name
+    seed_path = seed_assignment.get("seed_image_path") or item.get("seed_image_used") or seed_file
     seed_hint = item.get("seed_filename_prompt_hint") or seed_assignment.get("filename_prompt_hint") or ""
-    sync_targets = item.get("sync_targets", {}) if isinstance(item.get("sync_targets"), dict) else {}
-    cue_times = sync_targets.get("clip_local_seconds") or []
-    cue_text = ", ".join(f"{_as_float(value):.2f}s" for value in cue_times)
+    cue_times = _cue_times_from_item(item)
+    cue_text = format_cue_times(cue_times)
     cue_sentence = (
         f"Hard motion cue times inside this clip: {cue_text}. "
-        "Hit visible movement accents on these cue times only; keep the in-between motion smooth and controlled. "
+        "Land the visible movement arrival or reversal on these cue times; do not time the fastest travel point or the held pose to the beat. "
         if cue_times
-        else "Use the detected percussive beat grid for visible motion accents. "
+        else "Hard motion cue times inside this clip: none planned. Use the detected percussive beat grid for visible motion accents. "
     )
-    return (
-        f"SCENE-SPECIFIC CLIP {clip_index:02d}. "
-        f"Use seed image file {seed_file} as the visual source of truth for this clip only. "
-        f"Seed filename hint: {seed_hint}. "
-        f"Scene timing: {scene.get('start')}s to {scene.get('end')}s, duration {scene.get('duration')}s. "
-        f"{cue_sentence}"
-        "Make this clip visually and rhythmically specific to its seed image, timestamp range, and scene index. "
-        "Preserve the seed framing, layout, lighting direction, background continuity, and subject identity. "
-        "Avoid off-grid random motion, geometry drift, identity drift, and unplanned scene changes."
+    return "\n".join(
+        [
+            f"SCENE-SPECIFIC CLIP {clip_index:02d}.",
+            f"Assigned seed image: {seed_path}.",
+            f"Seed filename hint: {seed_hint}.",
+            (
+                "Scene timing: "
+                f"{_format_seconds(scene.get('start'))} to {_format_seconds(scene.get('end'))}, "
+                f"duration {_format_seconds(scene.get('duration'))}."
+            ),
+            cue_sentence.strip(),
+            "Make this clip visually and rhythmically specific to its assigned seed image, timestamp range, and scene index.",
+            "Preserve the seed framing, layout, lighting direction, background continuity, and subject identity.",
+            "Keep motion between cue points smooth, controlled, and continuous.",
+            "Avoid off-grid random motion, geometry drift, identity drift, and unplanned scene changes.",
+        ]
     )
 
 
 def apply_scene_specific_prompt_text(item: dict[str, Any]) -> None:
     base_prompt = str(item.get("prompt_text") or "").strip()
-    block = scene_specific_prompt_block(item)
-    if "SCENE-SPECIFIC CLIP" in base_prompt:
-        prompt_text = base_prompt
-    else:
-        prompt_text = f"{block} {base_prompt}".strip()
-    sync_targets = item.get("sync_targets", {}) if isinstance(item.get("sync_targets"), dict) else {}
-    cue_times = sync_targets.get("clip_local_seconds") or []
-    cue_text = ", ".join(f"{_as_float(value):.2f}s" for value in cue_times)
+    prompt_text = scene_specific_prompt_block(item)
+    cue_text = format_cue_times(_cue_times_from_item(item))
     item["base_prompt_text"] = base_prompt
+    item["base_prompt_preserved_for_audit_only"] = bool(base_prompt)
+    item["generic_prompt_removed"] = True
     item["prompt_text"] = prompt_text
     item["ltx_payload_prompt"] = prompt_text
     item["scene_specific_prompt_applied"] = True
     item["scene_specific_prompt_source"] = "clip_plan_export.scene_specific_prompt_block"
     item["prompt_sections"] = {
-        "visual_prompt": f"Seed image source: {item.get('seed_image_used')}. Seed filename hint: {item.get('seed_filename_prompt_hint') or ''}.",
-        "motion_prompt": f"Scene-specific motion should match this exact timestamp range. Hard motion cue times inside this clip: {cue_text}.",
-        "camera_prompt": "Camera behavior should preserve the seed image framing and scene continuity.",
+        "visual_prompt": (
+            f"Assigned seed image: {item.get('seed_image_used')}. "
+            f"Seed filename hint: {item.get('seed_filename_prompt_hint') or ''}."
+        ),
+        "motion_prompt": (
+            f"Hard motion cue times inside this clip: {cue_text}. "
+            "Land the visible movement arrival or reversal on these cue times; do not time the fastest travel point or the held pose to the beat. "
+            "Keep motion between cue points smooth, controlled, and continuous."
+        ),
+        "camera_prompt": "Preserve the seed framing, layout, lighting direction, background continuity, and subject identity.",
         "constraint_prompt": "Avoid off-grid random motion, geometry drift, identity drift, and unplanned scene changes.",
     }
 
@@ -181,7 +204,9 @@ def build_clip_plan(item: dict[str, Any], analysis: dict[str, Any], clip_plan_js
         "sync_targets": item.get("sync_targets", {}),
         "prompt_sections": item.get("prompt_sections") or split_prompt_sections(item.get("prompt_text", "")),
         "base_prompt_text": item.get("base_prompt_text"),
-        "ltx_payload_prompt": item.get("prompt_text"),
+        "base_prompt_preserved_for_audit_only": item.get("base_prompt_preserved_for_audit_only", False),
+        "generic_prompt_removed": item.get("generic_prompt_removed", False),
+        "ltx_payload_prompt": item.get("ltx_payload_prompt", item.get("prompt_text")),
         "prompt_text": item.get("prompt_text"),
         "resolution": item.get("resolution"),
         "beat_alignment_enabled": bool(item.get("beat_alignment_enabled")),

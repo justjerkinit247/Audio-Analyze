@@ -17,8 +17,10 @@ except Exception:
 
 try:
     from .path_policy import resolve_runtime_path, serialize_path
+    from .clip_plan_export import scene_specific_prompt_block
 except ImportError:
     from path_policy import resolve_runtime_path, serialize_path
+    from clip_plan_export import scene_specific_prompt_block
 
 
 DEFAULT_MAX_SHIFT_SECONDS = 0.35
@@ -712,26 +714,43 @@ def correction_entry(scene: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def replace_prompt_cue_times(text: str, old_times: list[float], new_times: list[float]) -> str:
-    patched = str(text or "")
-    for old, new in zip(old_times, new_times):
-        candidates = {
-            f"{old:.3f}s",
-            f"{old:.2f}s",
-            f"{old:.1f}s",
-            f"{old:g}s",
-            f"{old:.3f} seconds",
-            f"{old:.2f} seconds",
-            f"{old:g} seconds",
-        }
-        replacement_values = {
-            "s": f"{new:.2f}s",
-            " seconds": f"{new:.2f} seconds",
-        }
-        for candidate in sorted(candidates, key=len, reverse=True):
-            suffix = " seconds" if candidate.endswith(" seconds") else "s"
-            patched = patched.replace(candidate, replacement_values[suffix])
-    return patched
+def _cue_text_from_item(item: dict[str, Any]) -> str:
+    return ", ".join(f"{value:.2f}s" for value in cue_times_from_plan(item))
+
+
+def rebuild_clean_prompt_fields(
+    item: dict[str, Any],
+    calibration_note_text: str | None = None,
+) -> None:
+    previous_prompt = str(item.get("prompt_text") or "").strip()
+    previous_base = str(item.get("base_prompt_text") or "").strip()
+    if previous_base:
+        item["base_prompt_text"] = previous_base
+    elif previous_prompt:
+        item["base_prompt_text"] = previous_prompt
+    item["base_prompt_preserved_for_audit_only"] = bool(item.get("base_prompt_text"))
+    item["generic_prompt_removed"] = True
+
+    clean_prompt = scene_specific_prompt_block(item)
+    if calibration_note_text:
+        clean_prompt = f"{calibration_note_text}\n\n{clean_prompt}"
+    item["prompt_text"] = clean_prompt
+    item["ltx_payload_prompt"] = clean_prompt
+
+    seed_hint = item.get("seed_filename_prompt_hint") or ""
+    item["prompt_sections"] = {
+        "visual_prompt": (
+            f"Assigned seed image: {item.get('seed_image_used')}. "
+            f"Seed filename hint: {seed_hint}."
+        ),
+        "motion_prompt": (
+            f"Hard motion cue times inside this clip: {_cue_text_from_item(item)}. "
+            "Land the visible movement arrival or reversal on these cue times; do not time the fastest travel point or the held pose to the beat. "
+            "Keep motion between cue points smooth, controlled, and continuous."
+        ),
+        "camera_prompt": "Preserve the seed framing, layout, lighting direction, background continuity, and subject identity.",
+        "constraint_prompt": "Avoid off-grid random motion, geometry drift, identity drift, and unplanned scene changes.",
+    }
 
 
 def calibration_note(offset: float | None) -> str:
@@ -749,7 +768,12 @@ def calibration_note(offset: float | None) -> str:
     )
 
 
-def patch_plan_item(item: dict[str, Any], adjustment_seconds: float, median_offset: float | None) -> dict[str, Any]:
+def patch_plan_item(
+    item: dict[str, Any],
+    adjustment_seconds: float,
+    median_offset: float | None,
+    changed: bool = True,
+) -> dict[str, Any]:
     patched = json.loads(json.dumps(item, default=str))
     patched.pop("clip_plan_path", None)
     sync_targets = patched.get("sync_targets", {}) if isinstance(patched.get("sync_targets"), dict) else {}
@@ -759,21 +783,10 @@ def patch_plan_item(item: dict[str, Any], adjustment_seconds: float, median_offs
         sync_targets["clip_local_seconds"] = new_times
         patched["sync_targets"] = sync_targets
 
-    note = calibration_note(median_offset)
-    for field in ("prompt_text", "ltx_payload_prompt", "base_prompt_text"):
-        if patched.get(field):
-            patched[field] = replace_prompt_cue_times(str(patched[field]), old_times, new_times)
-            if note not in patched[field]:
-                patched[field] = f"{patched[field].rstrip()}\n\n{note}"
-
-    sections = patched.get("prompt_sections")
-    if isinstance(sections, dict):
-        for key, value in list(sections.items()):
-            if isinstance(value, str):
-                sections[key] = replace_prompt_cue_times(value, old_times, new_times)
-                if key == "motion_prompt" and note not in sections[key]:
-                    sections[key] = f"{sections[key].rstrip()} {note}"
+    note = calibration_note(median_offset) if changed else None
+    rebuild_clean_prompt_fields(patched, calibration_note_text=note)
     patched["asmo_sync_calibration"] = {
+        "changed": bool(changed),
         "median_twerk_hit_offset_seconds": median_offset,
         "cue_time_adjustment_seconds": round(adjustment_seconds, 3),
         "note": note,
@@ -817,11 +830,14 @@ def write_patched_plans(
         holy_plan = read_json(holy_plan_path)
         for item in holy_plan.get("results", []):
             idx = as_float(item.get("clip_index"))
-            if idx is None or int(idx) not in scene_by_index:
+            if idx is None:
                 continue
-            scene = scene_by_index[int(idx)]
-            adjustment = as_float(scene.get("cue_time_adjustment_seconds"), 0.0) or 0.0
-            patched_item = patch_plan_item(item, adjustment, scene.get("median_twerk_hit_offset_seconds"))
+            scene = scene_by_index.get(int(idx))
+            changed = scene is not None
+            adjustment = as_float(scene.get("cue_time_adjustment_seconds"), 0.0) if scene else 0.0
+            adjustment = adjustment or 0.0
+            median_offset = scene.get("median_twerk_hit_offset_seconds") if scene else None
+            patched_item = patch_plan_item(item, adjustment, median_offset, changed=changed)
             if int(idx) in patched_clip_paths:
                 patched_path = patched_clip_paths[int(idx)]
                 patched_item["clip_plan_json"] = path_for_report(patched_path)
@@ -832,6 +848,12 @@ def write_patched_plans(
             "source_report": path_for_report(run_dir / "motion_sync" / "asmo_sync_report.json"),
             "patched_clip_plan_dir": path_for_report(patched_clip_dir),
             "patched_clip_plans": written_clip_plans,
+            "changed_scene_indices": sorted(scene_by_index),
+            "unchanged_scene_indices": [
+                int(item.get("clip_index"))
+                for item in holy_plan.get("results", [])
+                if int(item.get("clip_index", 0)) not in scene_by_index
+            ],
         }
         output_patched_plan.parent.mkdir(parents=True, exist_ok=True)
         write_json(output_patched_plan, holy_plan)
