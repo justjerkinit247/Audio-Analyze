@@ -1,6 +1,6 @@
 # Audio Analyze
 
-Audio Analyze is a local-first hobby pipeline for audio analysis, prompt packaging, Runway scene generation support, and short-form music video assembly.
+Audio Analyze is a local-first hobby pipeline for audio analysis, prompt packaging, Runway scene generation support, LTX scene generation support, and short-form music video assembly.
 
 ## What this repo does
 
@@ -8,6 +8,7 @@ Audio Analyze is a local-first hobby pipeline for audio analysis, prompt packagi
 - Batch-process folders of audio files
 - Generate prompt bundles and video cues
 - Build Runway-oriented scene planning artifacts
+- Build LTX-oriented seed-image scene planning artifacts
 - Assemble short-form reels from generated scene clips
 - Export beat-cut music video edits for TikTok/Reels style workflows
 
@@ -27,6 +28,56 @@ The repo includes tools that turn analysis output into:
 - style mode bundles
 - scene planning data
 - Runway handoff artifacts
+- LTX filename-hint motion prompt artifacts
+
+### LTX filename-hint expansion
+`src/audio_analyze/ltx_filename_hint_expander.py` expands scene hints embedded in seed image filenames into LTX image-to-video motion prompts.
+
+This module is general-purpose. It does not analyze the actual image. The filename hint is treated as the creative source of truth, while the seed image remains the visual anchor for LTX.
+
+Example seed image filename:
+
+```text
+scene_01_duck_flies_off_keyhole_to_ocean_clouds.png
+```
+
+Extracted scene hint:
+
+```text
+duck flies off keyhole to ocean clouds
+```
+
+Output text format:
+
+```text
+[MOTION_PROMPT]
+The expanded LTX motion prompt goes here.
+
+[NEGATIVE_PROMPT]
+cleanup terms and negative prompt terms go here
+```
+
+Standalone smoke test:
+
+```bash
+PYTHONPATH=src python -m audio_analyze.ltx_filename_hint_expander single scene_01_duck_flies_off_keyhole_to_ocean_clouds.png
+```
+
+Batch seed-folder expansion:
+
+```bash
+PYTHONPATH=src python -m audio_analyze.ltx_filename_hint_expander expand-dir --seed-dir inputs/ltx_seed_images --output-dir inputs/prompts/ltx_filename_hints
+```
+
+Apply filename-hint expansions into an existing LTX plan JSON:
+
+```bash
+PYTHONPATH=src python -m audio_analyze.ltx_filename_hint_expander apply-plan --plan-json outputs/ltx_video_run/holy_cheeks_ltx_plan.json --output-dir inputs/prompts/ltx_filename_hints
+```
+
+Provider modes:
+- `template`: offline deterministic fallback; no API key required
+- `openai`: optional AI expansion provider; requires the `openai` package and an OpenAI API key
 
 ### Runway / video workflow
 Current video-side tooling includes:
@@ -56,6 +107,7 @@ Notable modules in `src/audio_analyze/` include:
 - `holy_cheeks_stage_pipeline.py`
 - `beat_cut_engine.py`
 - `mid_song_reel_builder.py`
+- `ltx_filename_hint_expander.py`
 
 ## Project intent
 
