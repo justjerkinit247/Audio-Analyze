@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - ltx-orchestrator-v1
   pull_request:
     branches:
       - main
