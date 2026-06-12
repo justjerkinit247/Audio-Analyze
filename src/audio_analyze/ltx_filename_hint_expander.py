@@ -13,13 +13,20 @@ try:
 except ImportError:
     from path_policy import resolve_runtime_path, serialize_path
 
+try:
+    from .local_ai_client import LocalAIClient, LocalAIConfig, LocalAIError
+except ImportError:
+    from local_ai_client import LocalAIClient, LocalAIConfig, LocalAIError
+
 
 ALLOWED_IMAGES = {".jpg", ".jpeg", ".png", ".webp"}
 PROMPT_MAX_CHARS = 5000
 DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_OLLAMA_MODEL = "gemma3:4b"
 MOTION_MARKER = "[MOTION_PROMPT]"
 NEGATIVE_MARKER = "[NEGATIVE_PROMPT]"
 DEFAULT_PROVIDER = "template"
+PROVIDER_CHOICES = ["template", "openai", "ollama"]
 
 SCENE_PREFIX_PATTERNS = [
     re.compile(r"^(?:scene|clip|shot|seed|image|img)[_\-\s]*\d{1,4}[_\-\s]*", re.IGNORECASE),
@@ -52,6 +59,16 @@ DEFAULT_NEGATIVE_TERMS = [
 ]
 
 BIRD_HINT_TOKENS = {"duck", "bird", "goose", "swan", "crow", "raven", "eagle", "wings", "wing"}
+
+
+LOCAL_AI_SYSTEM_PROMPT = (
+    "You convert seed-image filename scene hints into cinematic LTX image-to-video motion prompts. "
+    "Return only one strict JSON object. Do not wrap it in markdown. "
+    "Required keys: filename, scene_hint, ltx_motion_prompt, negative_prompt, motion_notes. "
+    "Use only the filename scene hint. Do not claim to see or analyze the image. "
+    "The ltx_motion_prompt must be a present-tense paragraph describing subject motion, "
+    "camera motion, environment motion, mood, and shot progression."
+)
 
 
 def _collapse_spaces(value: str) -> str:
@@ -177,6 +194,41 @@ OPENAI_SCHEMA: dict[str, Any] = {
 }
 
 
+PROMPT_KEY_ALIASES = (
+    "motion_prompt",
+    "prompt",
+    "video_prompt",
+    "ltx_prompt",
+    "description",
+    "scene_motion_prompt",
+    "cinematic_prompt",
+)
+
+
+def coerce_motion_prompt_data(data: dict[str, Any], filename: str, scene_hint: str, model: str | None = None) -> dict[str, Any]:
+    """Normalize common local-model response shapes before final expansion validation."""
+
+    coerced = dict(data or {})
+    if not coerced.get("ltx_motion_prompt"):
+        for key in PROMPT_KEY_ALIASES:
+            if coerced.get(key):
+                coerced["ltx_motion_prompt"] = coerced[key]
+                break
+
+    notes = list(coerced.get("motion_notes") or [])
+    if not coerced.get("ltx_motion_prompt"):
+        coerced["ltx_motion_prompt"] = template_motion_prompt(scene_hint)
+        notes.append("deterministic fallback used because local AI did not return a recognized motion prompt key")
+
+    coerced.setdefault("filename", filename)
+    coerced.setdefault("scene_hint", scene_hint)
+    coerced.setdefault("negative_prompt", build_negative_prompt(scene_hint))
+    coerced["motion_notes"] = notes
+    if model and not coerced.get("model"):
+        coerced["model"] = model
+    return coerced
+
+
 def _extract_output_text(response: Any) -> str:
     output_text = getattr(response, "output_text", None)
     if output_text:
@@ -216,6 +268,31 @@ def expand_with_openai(scene_hint: str, filename: str, model: str | None = None,
         },
     )
     return normalize_expansion(json.loads(_extract_output_text(response)), filename=filename, scene_hint=scene_hint, provider="openai")
+
+
+def expand_with_ollama(scene_hint: str, filename: str, model: str | None = None, client: Any = None) -> dict[str, Any]:
+    active_model = model or os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+    if client is None:
+        client = LocalAIClient(LocalAIConfig.from_env(model=active_model))
+
+    try:
+        data = client.chat_json(
+            LOCAL_AI_SYSTEM_PROMPT,
+            build_openai_instruction(filename, scene_hint),
+            schema_hint=json.dumps(OPENAI_SCHEMA),
+        )
+    except LocalAIError as exc:
+        data = {
+            "filename": filename,
+            "scene_hint": scene_hint,
+            "ltx_motion_prompt": template_motion_prompt(scene_hint),
+            "negative_prompt": build_negative_prompt(scene_hint),
+            "motion_notes": [f"deterministic fallback used because Ollama request failed: {exc}"],
+            "model": active_model,
+        }
+
+    data = coerce_motion_prompt_data(data, filename=filename, scene_hint=scene_hint, model=active_model)
+    return normalize_expansion(data, filename=filename, scene_hint=scene_hint, provider="ollama")
 
 
 def expand_with_template(scene_hint: str, filename: str) -> dict[str, Any]:
@@ -272,6 +349,8 @@ def expand_scene_hint(
         return expand_with_template(scene_hint, filename)
     if provider == "openai":
         return expand_with_openai(scene_hint, filename, model=model, client=client)
+    if provider == "ollama":
+        return expand_with_ollama(scene_hint, filename, model=model, client=client)
     raise ValueError(f"Unsupported provider: {provider}")
 
 
@@ -297,6 +376,14 @@ def write_expansion_files(image_path: str | Path, output_dir: str | Path, expans
     return {"txt_path": serialize_path(txt_path), "json_path": serialize_path(json_path)}
 
 
+def _build_provider_client(provider: str, model: str | None, client_factory: Callable[[], Any] | None) -> Any:
+    if client_factory and provider in {"openai", "ollama"}:
+        return client_factory()
+    if provider == "ollama":
+        return LocalAIClient(LocalAIConfig.from_env(model=model or DEFAULT_OLLAMA_MODEL))
+    return None
+
+
 def expand_seed_dir(
     seed_dir: str | Path,
     output_dir: str | Path = "inputs/prompts/ltx_filename_hints",
@@ -305,7 +392,7 @@ def expand_seed_dir(
     client_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     output_records = []
-    client = client_factory() if client_factory and provider == "openai" else None
+    client = _build_provider_client(provider, model, client_factory)
     for image_path in iter_seed_images(seed_dir):
         scene_hint = clean_scene_hint(image_path.name)
         if not scene_hint:
@@ -345,7 +432,7 @@ def apply_expansions_to_plan_data(
     output_dir: str | Path | None = None,
     client_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
-    client = client_factory() if client_factory and provider == "openai" else None
+    client = _build_provider_client(provider, model, client_factory)
     records = []
     for item in plan.get("results", []):
         seed_image = item.get("seed_image_used") or item.get("seed_assignment", {}).get("seed_file")
@@ -418,20 +505,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     single = sub.add_parser("single", help="Expand one filename scene hint.")
     single.add_argument("filename")
-    single.add_argument("--provider", choices=["template", "openai"], default=DEFAULT_PROVIDER)
+    single.add_argument("--provider", choices=PROVIDER_CHOICES, default=DEFAULT_PROVIDER)
     single.add_argument("--model", default=None)
 
     expand_dir_parser = sub.add_parser("expand-dir", help="Create _ltx.txt and _ltx.json files for every seed image in a directory.")
     expand_dir_parser.add_argument("--seed-dir", default="inputs/ltx_seed_images")
     expand_dir_parser.add_argument("--output-dir", default="inputs/prompts/ltx_filename_hints")
-    expand_dir_parser.add_argument("--provider", choices=["template", "openai"], default=DEFAULT_PROVIDER)
+    expand_dir_parser.add_argument("--provider", choices=PROVIDER_CHOICES, default=DEFAULT_PROVIDER)
     expand_dir_parser.add_argument("--model", default=None)
 
     plan_parser = sub.add_parser("apply-plan", help="Add expanded filename-hint prompts into an existing LTX plan JSON before submit.")
     plan_parser.add_argument("--plan-json", required=True)
     plan_parser.add_argument("--output", default=None)
     plan_parser.add_argument("--output-dir", default=None, help="Optional folder for per-seed _ltx.txt/_ltx.json prompt files.")
-    plan_parser.add_argument("--provider", choices=["template", "openai"], default=DEFAULT_PROVIDER)
+    plan_parser.add_argument("--provider", choices=PROVIDER_CHOICES, default=DEFAULT_PROVIDER)
     plan_parser.add_argument("--model", default=None)
     plan_parser.add_argument("--replace-prompt", action="store_true", help="Use only the filename expansion as prompt_text instead of appending it.")
     return parser
