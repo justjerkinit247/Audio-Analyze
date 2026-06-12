@@ -4,6 +4,19 @@ from pathlib import Path
 import argparse
 import json
 
+try:
+    from .asmo_negative_prompt_memory import (
+        NEGATIVE_MARKER,
+        apply_negative_memory_to_plan_data,
+        update_negative_prompt_memory_from_feedback,
+    )
+except ImportError:
+    from asmo_negative_prompt_memory import (
+        NEGATIVE_MARKER,
+        apply_negative_memory_to_plan_data,
+        update_negative_prompt_memory_from_feedback,
+    )
+
 
 def read_json(path: Path, default=None):
     path = Path(path)
@@ -74,6 +87,19 @@ def compress_prompt(prompt: str, max_chars: int = 4200) -> str:
     return prompt[:max_chars].rsplit(" ", 1)[0].rstrip() + "."
 
 
+def append_directive_before_negative_section(prompt: str, directive: str) -> str:
+    prompt = str(prompt or "").strip()
+    directive = str(directive or "").strip()
+    if not directive:
+        return prompt
+    update_text = "ASMO Memory Bank update: " + directive
+    if NEGATIVE_MARKER not in prompt:
+        return (prompt + " " + update_text).strip()
+    before, after = prompt.split(NEGATIVE_MARKER, 1)
+    before = (before.rstrip() + " " + update_text).strip()
+    return f"{before}\n\n{NEGATIVE_MARKER}{after}"
+
+
 def build_memory_directive(memory: dict, feedback_packet: dict, scene_id: int) -> str:
     issues = issue_set(feedback_packet, scene_id)
     movement_skill = best_skill_name(memory.get("movement_skills"))
@@ -112,7 +138,7 @@ def patch_plan_with_memory(plan: dict, feedback_packet: dict, strategy_scores: d
         directive = build_memory_directive(memory, feedback_packet, scene_id)
         prompt = compress_prompt(original)
         if directive:
-            prompt = compress_prompt(prompt + " ASMO Memory Bank update: " + directive, max_chars=5000)
+            prompt = compress_prompt(append_directive_before_negative_section(prompt, directive), max_chars=5000)
         item["base_prompt_before_memory_bank"] = original
         item["prompt_text"] = prompt
         item["asmo_memory_bank_directive"] = directive
@@ -121,12 +147,16 @@ def patch_plan_with_memory(plan: dict, feedback_packet: dict, strategy_scores: d
 
 def build_next_plan(plan_json: Path, state_root: Path, output: Path) -> dict:
     plan_json = Path(plan_json)
+    state_root = Path(state_root)
     plan = read_json(plan_json, default={}) or {}
     validate_plan_has_results(plan, plan_json)
-    feedback = read_json(Path(state_root) / "active" / "feedback" / "feedback_packet.json", default={}) or {}
-    scores = read_json(Path(state_root) / "active" / "feedback" / "strategy_scores.json", default={}) or {}
-    memory = load_memory(Path(state_root))
+    feedback = read_json(state_root / "active" / "feedback" / "feedback_packet.json", default={}) or {}
+    scores = read_json(state_root / "active" / "feedback" / "strategy_scores.json", default={}) or {}
+    memory = load_memory(state_root)
+    negative_summary = update_negative_prompt_memory_from_feedback(state_root, feedback_packet=feedback)
     patched = patch_plan_with_memory(plan, feedback, scores, memory)
+    patched = apply_negative_memory_to_plan_data(patched, state_root)
+    patched["asmo_negative_prompt_memory_summary"] = negative_summary
     validate_plan_has_results(patched, output)
     write_json(output, patched)
     return patched
