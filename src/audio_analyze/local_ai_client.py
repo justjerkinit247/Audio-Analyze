@@ -117,7 +117,6 @@ class LocalAIClient:
         prompt = str(user or "")
         if schema_hint:
             prompt = f"{prompt}\n\nJSON schema/context hint:\n{schema_hint}"
-        text = self.chat_text(system, prompt) if False else None
         data = self._post_chat(self._chat_payload(system, prompt, json_mode=True))
         message = data.get("message", {})
         content = message.get("content", "") if isinstance(message, dict) else ""
