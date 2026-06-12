@@ -4,6 +4,17 @@ from pathlib import Path
 import argparse
 import json
 
+try:
+    from .asmo_negative_prompt_memory import (
+        apply_negative_memory_to_plan_data,
+        update_negative_prompt_memory_from_feedback,
+    )
+except ImportError:
+    from asmo_negative_prompt_memory import (
+        apply_negative_memory_to_plan_data,
+        update_negative_prompt_memory_from_feedback,
+    )
+
 
 def read_json(path: Path, default=None):
     path = Path(path)
@@ -121,12 +132,16 @@ def patch_plan_with_memory(plan: dict, feedback_packet: dict, strategy_scores: d
 
 def build_next_plan(plan_json: Path, state_root: Path, output: Path) -> dict:
     plan_json = Path(plan_json)
+    state_root = Path(state_root)
     plan = read_json(plan_json, default={}) or {}
     validate_plan_has_results(plan, plan_json)
-    feedback = read_json(Path(state_root) / "active" / "feedback" / "feedback_packet.json", default={}) or {}
-    scores = read_json(Path(state_root) / "active" / "feedback" / "strategy_scores.json", default={}) or {}
-    memory = load_memory(Path(state_root))
+    feedback = read_json(state_root / "active" / "feedback" / "feedback_packet.json", default={}) or {}
+    scores = read_json(state_root / "active" / "feedback" / "strategy_scores.json", default={}) or {}
+    memory = load_memory(state_root)
+    negative_summary = update_negative_prompt_memory_from_feedback(state_root, feedback_packet=feedback)
     patched = patch_plan_with_memory(plan, feedback, scores, memory)
+    patched = apply_negative_memory_to_plan_data(patched, state_root)
+    patched["asmo_negative_prompt_memory_summary"] = negative_summary
     validate_plan_has_results(patched, output)
     write_json(output, patched)
     return patched
