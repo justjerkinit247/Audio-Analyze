@@ -3,7 +3,7 @@ name: ASMO Smoke Test
 on:
   push:
     branches:
-      - lyric-audio-motion-sync-v1
+      - main
   pull_request:
     branches:
       - main
