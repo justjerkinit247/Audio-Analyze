@@ -1,0 +1,91 @@
+<#
+.SYNOPSIS
+Run the LTX filename-hint expander through the OpenAI provider from Windows PowerShell.
+
+.USAGE
+From a fresh PowerShell window, after switching to this repo folder:
+
+    .\scripts\Test-LtxFilenameHintExpanderOpenAI.ps1
+
+This script creates/activates .venv, installs repo requirements, installs the OpenAI Python SDK,
+and runs one smoke test using --provider openai.
+
+It does not save your API key. If OPENAI_API_KEY is not already set, it prompts for it and stores it
+only for this PowerShell process.
+#>
+
+$ErrorActionPreference = "Stop"
+
+function Invoke-CheckedNativeCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $FilePath,
+
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]] $ArgumentList
+    )
+
+    & $FilePath @ArgumentList
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($ArgumentList -join ' ')"
+    }
+}
+
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $RepoRoot
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+
+$VenvActivate = Join-Path $RepoRoot ".venv\Scripts\Activate.ps1"
+if (!(Test-Path $VenvActivate)) {
+    Write-Host "Creating virtual environment at .venv ..."
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        Invoke-CheckedNativeCommand py -m venv .venv
+    }
+    else {
+        Invoke-CheckedNativeCommand python -m venv .venv
+    }
+}
+
+. $VenvActivate
+
+Invoke-CheckedNativeCommand python -m pip install --upgrade pip
+Invoke-CheckedNativeCommand python -m pip install -r requirements.txt
+Invoke-CheckedNativeCommand python -m pip install openai
+
+$env:PYTHONPATH = "src"
+
+if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
+    $SecureKey = Read-Host "Paste your OpenAI API key" -AsSecureString
+    $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureKey)
+    try {
+        $PlainKey = [Runtime.InteropServices.Marshal]::PtrToStringAuto($Bstr)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr)
+    }
+    $env:OPENAI_API_KEY = $PlainKey
+}
+
+$Model = $env:OPENAI_MODEL
+if ([string]::IsNullOrWhiteSpace($Model)) {
+    $Model = "gpt-4.1-mini"
+}
+
+Write-Host ""
+Write-Host "Running OpenAI-provider smoke test..."
+Write-Host "Model: $Model"
+Write-Host ""
+
+try {
+    Invoke-CheckedNativeCommand python -m audio_analyze.ltx_filename_hint_expander single "scene_01_duck_flies_off_keyhole_to_ocean_clouds.png" --provider openai --model $Model
+}
+catch {
+    Write-Host ""
+    Write-Host "OpenAI-provider smoke test failed."
+    Write-Host "If the error says insufficient_quota, add API billing/credits or raise your project budget, then run this script again."
+    throw
+}
+
+Write-Host ""
+Write-Host "Done. Output above should contain [MOTION_PROMPT] and [NEGATIVE_PROMPT]."
