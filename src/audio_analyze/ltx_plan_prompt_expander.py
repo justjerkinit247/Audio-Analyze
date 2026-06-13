@@ -129,32 +129,15 @@ def render_audio_timing_block(audio_timing: dict[str, Any]) -> str:
     )
 
 
-def _scene_timing_sentence(item: dict[str, Any], plan: dict[str, Any]) -> str:
-    scene = item.get("scene") or {}
-    idx = scene.get("scene_index") or item.get("clip_index")
-    start = scene.get("start")
-    end = scene.get("end")
-    tempo = (plan.get("analysis") or {}).get("tempo_bpm") or (plan.get("analysis") or {}).get("tempo_bpm_from_full_track")
-    if start is None or end is None:
-        timing = f"Scene {idx} uses the current planned clip timing."
-    else:
-        timing = f"Scene {idx} covers {float(start):.2f}s to {float(end):.2f}s of the source audio."
-    if tempo:
-        timing += f" Motion should feel rhythm-aware around {float(tempo):.2f} BPM without adding unrelated choreography."
-    return timing
-
-
 def build_scene_prompt_from_expansion(item: dict[str, Any], plan: dict[str, Any], expansion: dict[str, Any], audio_timing: dict[str, Any] | None = None) -> str:
     file_stem = item.get("file_stem") or plan.get("file_stem") or "ltx_scene"
     seed_hint = expansion.get("scene_hint") or item.get("seed_filename_prompt_hint") or ""
-    timing = _scene_timing_sentence(item, plan)
     audio_timing = audio_timing or build_audio_timing_metadata(item, plan)
     audio_timing_block = render_audio_timing_block(audio_timing)
     return (
         f"Image-to-video continuation for {file_stem}. "
         "Use the seed image as the exact source of truth for subject count, identity, pose, camera angle, framing, lighting, and background. "
         f"Seed filename scene direction: {seed_hint}. "
-        f"{timing} "
         "Do not import assumptions from previous projects, genres, songs, characters, religious imagery, nightclub imagery, or dance choreography unless directly present in the seed filename. "
         "Preserve the seed composition and make only the scene motion described below. "
         f"\n\n{audio_timing_block}\n{MOTION_MARKER}\n{expansion['ltx_motion_prompt']}\n\n{NEGATIVE_MARKER}\n{expansion['negative_prompt']}\n"
