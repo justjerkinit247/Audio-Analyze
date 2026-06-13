@@ -70,6 +70,48 @@ def resolve_audio_argument(audio=None, audio_dir=DEFAULT_AUDIO_DIR):
     return find_newest_audio(audio_dir), "newest_audio_in_folder"
 
 
+def _output_json_from_build_plan_call(args, kwargs):
+    if "output_json" in kwargs:
+        return kwargs["output_json"]
+    if len(args) >= 3:
+        return args[2]
+    raise TypeError("Could not determine output_json from build_plan call.")
+
+
+def _patch_plan_after_old_build_plan(
+    original_build_plan,
+    filename_hint_provider="ollama",
+    filename_hint_model="gemma3:4b",
+    apply_asmo_negative_memory=True,
+    state_root=DEFAULT_STATE_ROOT,
+):
+    """Wrap the old build_plan function without replacing the old orchestrator flow."""
+
+    def wrapped_build_plan(*args, **kwargs):
+        plan = original_build_plan(*args, **kwargs)
+        output_json = _output_json_from_build_plan_call(args, kwargs)
+
+        plan_expander = _load_plan_expander_module()
+        patched = plan_expander.expand_plan_data(
+            plan,
+            provider=filename_hint_provider,
+            model=filename_hint_model,
+        )
+
+        if apply_asmo_negative_memory:
+            negative_memory = _load_negative_memory_module()
+            patched = negative_memory.apply_negative_memory_to_plan_data(patched, state_root=state_root)
+            patched["asmo_negative_memory_applied"] = True
+        else:
+            patched["asmo_negative_memory_applied"] = False
+
+        write_json(output_json, patched)
+        print(f"Filename-hint expansion applied through old orchestrator build_plan: {patched.get('filename_hint_expansion')}")
+        return patched
+
+    return wrapped_build_plan
+
+
 def run_auto_audio_orchestrator(
     audio=None,
     audio_dir=DEFAULT_AUDIO_DIR,
@@ -94,126 +136,47 @@ def run_auto_audio_orchestrator(
     pipeline = _load_pipeline_module()
     orchestrator = _load_orchestrator_module()
     path_policy = _load_path_policy_module()
-    plan_expander = _load_plan_expander_module()
 
-    selected_seed_dir = seed_dir or pipeline.DEFAULT_SEED_DIR
-    selected_output_plan = output_plan or orchestrator.DEFAULT_PLAN_JSON
     selected_report_json = report_json or orchestrator.DEFAULT_ORCHESTRATOR_REPORT_JSON
-    selected_scene_seconds = scene_seconds if scene_seconds is not None else pipeline.DEFAULT_SCENE_SECONDS
-    selected_model = model or pipeline.DEFAULT_MODEL
-    selected_guidance_scale = guidance_scale if guidance_scale is not None else pipeline.DEFAULT_GUIDANCE_SCALE
-
     audio_path, audio_selection_method = resolve_audio_argument(audio, audio_dir=audio_dir)
     print(f"Auto audio selection method: {audio_selection_method}")
     print(f"Audio selected: {audio_path.resolve()}")
 
-    print("=" * 60)
-    print("LTX AUTO-AUDIO ORCHESTRATOR START")
-    print("=" * 60)
-
-    print("[1/5] Building base plan...")
-    plan = pipeline.build_plan(
-        audio_path=path_policy.serialize_path(audio_path),
-        seed_dir=selected_seed_dir,
-        output_json=selected_output_plan,
-        resolution=resolution,
-        max_scenes=max_scenes,
-        scene_seconds=selected_scene_seconds,
-        start_offset_seconds=start_offset_seconds,
-        beat_align=beat_align,
-        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
-        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+    original_build_plan = orchestrator.build_plan
+    orchestrator.build_plan = _patch_plan_after_old_build_plan(
+        original_build_plan,
+        filename_hint_provider=filename_hint_provider,
+        filename_hint_model=filename_hint_model,
+        apply_asmo_negative_memory=apply_asmo_negative_memory,
+        state_root=state_root,
     )
-
-    print("[2/5] Applying filename-hint prompt expansion...")
-    plan = plan_expander.expand_plan_data(
-        plan,
-        provider=filename_hint_provider,
-        model=filename_hint_model,
-    )
-
-    if apply_asmo_negative_memory:
-        negative_memory = _load_negative_memory_module()
-        plan = negative_memory.apply_negative_memory_to_plan_data(plan, state_root=state_root)
-        plan["asmo_negative_memory_applied"] = True
-    else:
-        plan["asmo_negative_memory_applied"] = False
-
-    plan["audio_selection_method"] = audio_selection_method
-    plan["auto_selected_audio"] = path_policy.serialize_path(audio_path)
-    plan["auto_selected_audio_resolved"] = str(audio_path.resolve())
-    write_json(selected_output_plan, plan)
-    print(f"Plan created: {path_policy.resolve_runtime_path(selected_output_plan).resolve()}")
-    print(f"Scene count: {plan.get('scene_count')}")
-    print(f"Filename-hint expansion: {plan.get('filename_hint_expansion')}")
-
-    print("[3/5] Running preflight...")
-    preflight = pipeline.run_preflight(
-        selected_output_plan,
-        orchestrator.DEFAULT_PREFLIGHT_JSON,
-        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
-        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
-    )
-    print(f"Preflight status: {preflight['status']}")
-
-    submit_summary = None
-    if preflight["status"] != "PASSED":
-        print("Preflight failed. Refusing submit-all.")
-        for problem in preflight.get("problems", []):
-            print(f"PROBLEM: {problem}")
-    else:
-        print("[4/5] Running submit-all...")
-        submit_summary = pipeline.submit_all(
-            plan_json=selected_output_plan,
-            output_dir=orchestrator.DEFAULT_SUBMIT_DIR,
-            model=selected_model,
-            guidance_scale=selected_guidance_scale,
-            dry_run=not live,
+    try:
+        result = orchestrator.orchestrate(
+            audio=path_policy.serialize_path(audio_path),
+            seed_dir=seed_dir or pipeline.DEFAULT_SEED_DIR,
+            output_plan=output_plan or orchestrator.DEFAULT_PLAN_JSON,
+            resolution=resolution,
+            max_scenes=max_scenes,
+            scene_seconds=scene_seconds if scene_seconds is not None else pipeline.DEFAULT_SCENE_SECONDS,
+            model=model or pipeline.DEFAULT_MODEL,
+            guidance_scale=guidance_scale if guidance_scale is not None else pipeline.DEFAULT_GUIDANCE_SCALE,
             live=live,
+            report_json=selected_report_json,
+            start_offset_seconds=start_offset_seconds,
+            beat_align=beat_align,
             allow_sorted_seed_fallback=allow_sorted_seed_fallback,
             allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
         )
+    finally:
+        orchestrator.build_plan = original_build_plan
 
-    print("[5/5] Writing orchestration manifests...")
-    manifest_paths = orchestrator.write_orchestration_manifests(
-        plan=plan,
-        preflight=preflight,
-        submit_summary=submit_summary,
-        output_dir=orchestrator.DEFAULT_ORCHESTRATION_DIR,
-        audio_path=path_policy.serialize_path(audio_path),
-    )
-    manifest_paths_resolved = {
-        name: str(path_policy.resolve_runtime_path(path).resolve())
-        for name, path in manifest_paths.items()
-    }
-
-    final_status = "complete" if preflight["status"] == "PASSED" else "failed_preflight"
-    result = {
-        "status": final_status,
-        "live": live,
-        "audio_selection_method": audio_selection_method,
-        "auto_selected_audio": path_policy.serialize_path(audio_path),
-        "auto_selected_audio_resolved": str(audio_path.resolve()),
-        "filename_hint_expansion": plan.get("filename_hint_expansion"),
-        "asmo_negative_memory_applied": plan.get("asmo_negative_memory_applied"),
-        "plan_json": path_policy.serialize_path(selected_output_plan),
-        "plan_json_resolved": str(path_policy.resolve_runtime_path(selected_output_plan).resolve()),
-        "preflight_json": path_policy.serialize_path(orchestrator.DEFAULT_PREFLIGHT_JSON),
-        "preflight_json_resolved": str(path_policy.resolve_runtime_path(orchestrator.DEFAULT_PREFLIGHT_JSON).resolve()),
-        "submit_dir": path_policy.serialize_path(orchestrator.DEFAULT_SUBMIT_DIR),
-        "submit_dir_resolved": str(path_policy.resolve_runtime_path(orchestrator.DEFAULT_SUBMIT_DIR).resolve()),
-        "manifest_paths": manifest_paths,
-        "manifest_paths_resolved": manifest_paths_resolved,
-        "summary": submit_summary,
-    }
+    result["audio_selection_method"] = audio_selection_method
+    result["auto_selected_audio"] = path_policy.serialize_path(audio_path)
+    result["auto_selected_audio_resolved"] = str(audio_path.resolve())
+    result["filename_hint_provider"] = filename_hint_provider
+    result["filename_hint_model"] = filename_hint_model
+    result["asmo_negative_memory_requested"] = bool(apply_asmo_negative_memory)
     write_json(selected_report_json, result)
-
-    print("=" * 60)
-    print("LTX AUTO-AUDIO ORCHESTRATOR COMPLETE")
-    print("=" * 60)
-    print(f"Dry run: {not live}")
-    print(f"Status: {final_status}")
-    print(f"Final report: {path_policy.resolve_runtime_path(selected_report_json).resolve()}")
     return result
 
 
@@ -222,7 +185,7 @@ def main():
     orchestrator = _load_orchestrator_module()
 
     parser = argparse.ArgumentParser(
-        description="LTX orchestrator wrapper that auto-selects audio and applies filename-hint prompt expansion before submit."
+        description="LTX wrapper that auto-selects audio, then runs the old orchestrator with filename-hint prompt expansion wired into build_plan."
     )
     parser.add_argument("--audio", default=None, help="Optional explicit audio path. If omitted, newest file in --audio-dir is used.")
     parser.add_argument("--audio-dir", default=DEFAULT_AUDIO_DIR)
