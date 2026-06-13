@@ -1,9 +1,11 @@
 from pathlib import Path
 import argparse
 import importlib
+import json
 
 
 DEFAULT_AUDIO_DIR = "inputs/audio"
+DEFAULT_STATE_ROOT = "outputs/ltx_video_run/_state"
 
 
 def _load_pipeline_module():
@@ -16,6 +18,21 @@ def _load_orchestrator_module():
 
 def _load_path_policy_module():
     return importlib.import_module(".path_policy", __package__)
+
+
+def _load_plan_expander_module():
+    return importlib.import_module(".ltx_plan_prompt_expander", __package__)
+
+
+def _load_negative_memory_module():
+    return importlib.import_module(".asmo_negative_prompt_memory", __package__)
+
+
+def write_json(path, data):
+    path_policy = _load_path_policy_module()
+    path = path_policy.resolve_runtime_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def find_newest_audio(audio_dir=DEFAULT_AUDIO_DIR):
@@ -53,6 +70,48 @@ def resolve_audio_argument(audio=None, audio_dir=DEFAULT_AUDIO_DIR):
     return find_newest_audio(audio_dir), "newest_audio_in_folder"
 
 
+def _output_json_from_build_plan_call(args, kwargs):
+    if "output_json" in kwargs:
+        return kwargs["output_json"]
+    if len(args) >= 3:
+        return args[2]
+    raise TypeError("Could not determine output_json from build_plan call.")
+
+
+def _patch_plan_after_old_build_plan(
+    original_build_plan,
+    filename_hint_provider="ollama",
+    filename_hint_model="gemma3:4b",
+    apply_asmo_negative_memory=True,
+    state_root=DEFAULT_STATE_ROOT,
+):
+    """Wrap the old build_plan function without replacing the old orchestrator flow."""
+
+    def wrapped_build_plan(*args, **kwargs):
+        plan = original_build_plan(*args, **kwargs)
+        output_json = _output_json_from_build_plan_call(args, kwargs)
+
+        plan_expander = _load_plan_expander_module()
+        patched = plan_expander.expand_plan_data(
+            plan,
+            provider=filename_hint_provider,
+            model=filename_hint_model,
+        )
+
+        if apply_asmo_negative_memory:
+            negative_memory = _load_negative_memory_module()
+            patched = negative_memory.apply_negative_memory_to_plan_data(patched, state_root=state_root)
+            patched["asmo_negative_memory_applied"] = True
+        else:
+            patched["asmo_negative_memory_applied"] = False
+
+        write_json(output_json, patched)
+        print(f"Filename-hint expansion applied through old orchestrator build_plan: {patched.get('filename_hint_expansion')}")
+        return patched
+
+    return wrapped_build_plan
+
+
 def run_auto_audio_orchestrator(
     audio=None,
     audio_dir=DEFAULT_AUDIO_DIR,
@@ -69,34 +128,55 @@ def run_auto_audio_orchestrator(
     beat_align=False,
     allow_sorted_seed_fallback=False,
     allow_duplicate_seed_reuse=False,
+    filename_hint_provider="ollama",
+    filename_hint_model="gemma3:4b",
+    apply_asmo_negative_memory=True,
+    state_root=DEFAULT_STATE_ROOT,
 ):
     pipeline = _load_pipeline_module()
     orchestrator = _load_orchestrator_module()
     path_policy = _load_path_policy_module()
 
+    selected_report_json = report_json or orchestrator.DEFAULT_ORCHESTRATOR_REPORT_JSON
     audio_path, audio_selection_method = resolve_audio_argument(audio, audio_dir=audio_dir)
     print(f"Auto audio selection method: {audio_selection_method}")
     print(f"Audio selected: {audio_path.resolve()}")
 
-    result = orchestrator.orchestrate(
-        audio=path_policy.serialize_path(audio_path),
-        seed_dir=seed_dir or pipeline.DEFAULT_SEED_DIR,
-        output_plan=output_plan or orchestrator.DEFAULT_PLAN_JSON,
-        resolution=resolution,
-        max_scenes=max_scenes,
-        scene_seconds=scene_seconds if scene_seconds is not None else pipeline.DEFAULT_SCENE_SECONDS,
-        model=model or pipeline.DEFAULT_MODEL,
-        guidance_scale=guidance_scale if guidance_scale is not None else pipeline.DEFAULT_GUIDANCE_SCALE,
-        live=live,
-        report_json=report_json or orchestrator.DEFAULT_ORCHESTRATOR_REPORT_JSON,
-        start_offset_seconds=start_offset_seconds,
-        beat_align=beat_align,
-        allow_sorted_seed_fallback=allow_sorted_seed_fallback,
-        allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+    original_build_plan = orchestrator.build_plan
+    orchestrator.build_plan = _patch_plan_after_old_build_plan(
+        original_build_plan,
+        filename_hint_provider=filename_hint_provider,
+        filename_hint_model=filename_hint_model,
+        apply_asmo_negative_memory=apply_asmo_negative_memory,
+        state_root=state_root,
     )
+    try:
+        result = orchestrator.orchestrate(
+            audio=path_policy.serialize_path(audio_path),
+            seed_dir=seed_dir or pipeline.DEFAULT_SEED_DIR,
+            output_plan=output_plan or orchestrator.DEFAULT_PLAN_JSON,
+            resolution=resolution,
+            max_scenes=max_scenes,
+            scene_seconds=scene_seconds if scene_seconds is not None else pipeline.DEFAULT_SCENE_SECONDS,
+            model=model or pipeline.DEFAULT_MODEL,
+            guidance_scale=guidance_scale if guidance_scale is not None else pipeline.DEFAULT_GUIDANCE_SCALE,
+            live=live,
+            report_json=selected_report_json,
+            start_offset_seconds=start_offset_seconds,
+            beat_align=beat_align,
+            allow_sorted_seed_fallback=allow_sorted_seed_fallback,
+            allow_duplicate_seed_reuse=allow_duplicate_seed_reuse,
+        )
+    finally:
+        orchestrator.build_plan = original_build_plan
+
     result["audio_selection_method"] = audio_selection_method
     result["auto_selected_audio"] = path_policy.serialize_path(audio_path)
     result["auto_selected_audio_resolved"] = str(audio_path.resolve())
+    result["filename_hint_provider"] = filename_hint_provider
+    result["filename_hint_model"] = filename_hint_model
+    result["asmo_negative_memory_requested"] = bool(apply_asmo_negative_memory)
+    write_json(selected_report_json, result)
     return result
 
 
@@ -105,7 +185,7 @@ def main():
     orchestrator = _load_orchestrator_module()
 
     parser = argparse.ArgumentParser(
-        description="LTX orchestrator wrapper that auto-selects the newest audio file from inputs/audio when --audio is omitted."
+        description="LTX wrapper that auto-selects audio, then runs the old orchestrator with filename-hint prompt expansion wired into build_plan."
     )
     parser.add_argument("--audio", default=None, help="Optional explicit audio path. If omitted, newest file in --audio-dir is used.")
     parser.add_argument("--audio-dir", default=DEFAULT_AUDIO_DIR)
@@ -122,6 +202,10 @@ def main():
     parser.add_argument("--allow-sorted-seed-fallback", action="store_true")
     parser.add_argument("--allow-duplicate-seed-reuse", action="store_true")
     parser.add_argument("--report-json", default=orchestrator.DEFAULT_ORCHESTRATOR_REPORT_JSON)
+    parser.add_argument("--filename-hint-provider", default="ollama", choices=["template", "openai", "ollama"])
+    parser.add_argument("--filename-hint-model", default="gemma3:4b")
+    parser.add_argument("--state-root", default=DEFAULT_STATE_ROOT)
+    parser.add_argument("--no-asmo-negative-memory", action="store_true")
     args = parser.parse_args()
 
     run_auto_audio_orchestrator(
@@ -140,6 +224,10 @@ def main():
         beat_align=args.beat_align,
         allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
         allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
+        filename_hint_provider=args.filename_hint_provider,
+        filename_hint_model=args.filename_hint_model,
+        apply_asmo_negative_memory=not args.no_asmo_negative_memory,
+        state_root=args.state_root,
     )
 
 
