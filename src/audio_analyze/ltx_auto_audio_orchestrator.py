@@ -125,7 +125,7 @@ def run_auto_audio_orchestrator(
     live=False,
     report_json=None,
     start_offset_seconds=0.0,
-    beat_align=False,
+    beat_align=True,
     allow_sorted_seed_fallback=False,
     allow_duplicate_seed_reuse=False,
     filename_hint_provider="ollama",
@@ -141,6 +141,7 @@ def run_auto_audio_orchestrator(
     audio_path, audio_selection_method = resolve_audio_argument(audio, audio_dir=audio_dir)
     print(f"Auto audio selection method: {audio_selection_method}")
     print(f"Audio selected: {audio_path.resolve()}")
+    print(f"Beat alignment enabled: {bool(beat_align)}")
 
     original_build_plan = orchestrator.build_plan
     orchestrator.build_plan = _patch_plan_after_old_build_plan(
@@ -173,6 +174,8 @@ def run_auto_audio_orchestrator(
     result["audio_selection_method"] = audio_selection_method
     result["auto_selected_audio"] = path_policy.serialize_path(audio_path)
     result["auto_selected_audio_resolved"] = str(audio_path.resolve())
+    result["beat_alignment_default"] = True
+    result["beat_alignment_enabled"] = bool(beat_align)
     result["filename_hint_provider"] = filename_hint_provider
     result["filename_hint_model"] = filename_hint_model
     result["asmo_negative_memory_requested"] = bool(apply_asmo_negative_memory)
@@ -195,7 +198,7 @@ def main():
     parser.add_argument("--max-scenes", type=int, default=None)
     parser.add_argument("--scene-seconds", type=float, default=pipeline.DEFAULT_SCENE_SECONDS)
     parser.add_argument("--start-offset-seconds", type=float, default=0.0)
-    parser.add_argument("--beat-align", action="store_true")
+    parser.add_argument("--no-beat-align", action="store_true", help="Disable default beat-aligned scene timing and use fixed scene intervals.")
     parser.add_argument("--model", default=pipeline.DEFAULT_MODEL)
     parser.add_argument("--guidance-scale", type=float, default=pipeline.DEFAULT_GUIDANCE_SCALE)
     parser.add_argument("--live", action="store_true")
@@ -221,7 +224,7 @@ def main():
         live=args.live,
         report_json=args.report_json,
         start_offset_seconds=args.start_offset_seconds,
-        beat_align=args.beat_align,
+        beat_align=not args.no_beat_align,
         allow_sorted_seed_fallback=args.allow_sorted_seed_fallback,
         allow_duplicate_seed_reuse=args.allow_duplicate_seed_reuse,
         filename_hint_provider=args.filename_hint_provider,
