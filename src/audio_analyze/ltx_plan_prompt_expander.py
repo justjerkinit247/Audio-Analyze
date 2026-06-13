@@ -136,10 +136,10 @@ def build_scene_prompt_from_expansion(item: dict[str, Any], plan: dict[str, Any]
     audio_timing_block = render_audio_timing_block(audio_timing)
     return (
         f"Image-to-video continuation for {file_stem}. "
-        "Use the seed image as the exact source of truth for subject count, identity, pose, camera angle, framing, lighting, and background. "
+        "Use the seed image as the visual anchor for subject identity, pose family, camera angle, framing, lighting, and background. "
         f"Seed filename scene direction: {seed_hint}. "
-        "Do not import assumptions from previous projects, genres, songs, characters, religious imagery, nightclub imagery, or dance choreography unless directly present in the seed filename. "
-        "Preserve the seed composition and make only the scene motion described below. "
+        "Allow creative cinematic interpretation and natural motion development as long as it remains coherent with the seed image, filename direction, and audio timing. "
+        "Avoid random prior-project assumptions or unrelated characters/settings, but do not over-constrain the shot. "
         f"\n\n{audio_timing_block}\n{MOTION_MARKER}\n{expansion['ltx_motion_prompt']}\n\n{NEGATIVE_MARKER}\n{expansion['negative_prompt']}\n"
     )
 
