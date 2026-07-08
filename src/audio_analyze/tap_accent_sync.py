@@ -10,8 +10,10 @@ import numpy as np
 
 try:
     from .path_policy import resolve_runtime_path, serialize_path
+    from .ltx_prompt_budget import compact_plan_prompts
 except ImportError:
     from path_policy import resolve_runtime_path, serialize_path
+    from ltx_prompt_budget import compact_plan_prompts
 
 
 TAP_SYNC_MARKER = "[TAP_SYNC]"
@@ -375,7 +377,7 @@ def apply_tap_sync_to_plan_data(
         "scene_count": len(results),
         "motion_profile_counts": profile_counts,
     }
-    return patched
+    return compact_plan_prompts(patched)
 
 
 def wrap_choreography_manifest(
