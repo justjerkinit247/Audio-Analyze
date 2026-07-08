@@ -65,7 +65,7 @@ Do not duplicate the existing orchestrator sequence in a new wrapper when a narr
 - Avoid unrelated cleanup in feature changes. Separate large hygiene removals from runtime changes.
 - Do not delete a runtime module merely because direct test coverage is missing; first check imports, CLI entry points, documentation, and external use.
 
-## Review priorities
+## Review guidelines
 
 Treat these as high-severity findings:
 
@@ -75,5 +75,6 @@ Treat these as high-severity findings:
 4. Windows-only absolute paths or serialization changes that break portable execution.
 5. Changes that silently remove `[AUDIO_TIMING]`, `[MOTION_PROMPT]`, `[NEGATIVE_PROMPT]`, beat alignment, or ASMO memory from the active plan.
 6. Committed local media, cache, generated output, or workstation metadata.
+7. Tests that pass without exercising the behavior claimed by the pull request.
 
-Keep review comments specific: cite the file and behavior, explain the failure mode, and suggest the smallest safe correction.
+Review only the pull request diff and directly affected code. Do not make live generation calls during review. Keep findings specific: cite the file and behavior, explain the concrete failure mode, and suggest the smallest safe correction.
