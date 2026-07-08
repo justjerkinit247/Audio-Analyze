@@ -40,3 +40,8 @@ inputs/lip_sync_audio/
 
 # Local generated LTX prompt/config files
 inputs/prompts/
+
+# Local editor, NLE, and cache metadata
+.gallery/
+CacheClip/
+*.pfl
