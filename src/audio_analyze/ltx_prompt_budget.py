@@ -169,12 +169,13 @@ def _compact_tap_sync(item: dict[str, Any], existing: str) -> str:
             "Alternate cheek emphasis only when physically natural. Both feet remain planted; heels stay down, knees bent, the same squat pose is maintained, and head, torso, and overall body height remain nearly constant. "
             "Maintain subtle pelvic micro-motion between taps so the opening and spaces between accents never freeze. "
             "Do not convert the accents into jumping, hopping, standing up, repeated squats, whole-body bouncing, vertical pumping, or feet leaving the floor. "
-            "Do not use kick-drum or bass-only hits as major movement triggers. This TAP_SYNC rule overrides conflicting generic motion wording."
+            "Do not use kick-drum or bass-only hits as major movement triggers. This TAP_SYNC rule overrides any generic kick, full-beat, jumping, bouncing, full-body, or vertical direction-change wording elsewhere in the prompt."
         )
     return (
         f"Primary tap-accent times inside this clip: {targets}. "
         "Use listed clap, snare, hi-hat, and sharp high-frequency accents as controlled visible action triggers. "
-        "Do not use kick-drum or bass-only hits as major movement triggers; maintain coherent motion between accents."
+        "Do not use kick-drum or bass-only hits as major movement triggers; maintain coherent motion between accents. "
+        "This TAP_SYNC rule overrides any generic kick or full-beat direction-change wording elsewhere in the prompt."
     )
 
 
