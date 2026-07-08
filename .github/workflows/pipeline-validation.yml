@@ -62,7 +62,8 @@ jobs:
             tests/test_ltx_filename_hint_expander.py \
             tests/test_ltx_filename_hint_expander_ollama.py \
             tests/test_local_ai_client.py \
-            tests/test_asmo_negative_prompt_memory.py
+            tests/test_asmo_negative_prompt_memory.py \
+            tests/test_ltx_tap_accent_sync.py
 
       - name: Create deterministic CI media fixtures
         run: |
@@ -127,18 +128,21 @@ jobs:
 
           scene = results[0]
           prompt = str(scene.get("prompt_text") or "")
-          for marker in ("[AUDIO_TIMING]", "[MOTION_PROMPT]", "[NEGATIVE_PROMPT]"):
+          for marker in ("[AUDIO_TIMING]", "[TAP_SYNC]", "[MOTION_PROMPT]", "[NEGATIVE_PROMPT]"):
               assert marker in prompt, f"Active prompt is missing {marker}"
 
           assert plan.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the plan"
+          assert (plan.get("tap_sync") or {}).get("policy") == "tap_not_boom", "Plan tap-sync policy is missing"
           assert report.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the report"
+          assert report.get("tap_sync_policy") == "tap_not_boom", "Report tap-sync policy is missing"
+          assert report.get("tap_accent_sync_requested") is True, "Tap-accent sync was not requested"
           assert report.get("status") == "complete", f"Unexpected report status: {report.get('status')}"
           assert report.get("live") is False, "Validation unexpectedly performed a live run"
           assert scene.get("prompt_build_method") == "filename_hint_expansion_with_audio_timing", (
               f"Unexpected prompt build method: {scene.get('prompt_build_method')}"
           )
 
-          print("Offline pipeline validation passed")
+          print("Offline tap-accent pipeline validation passed")
           print(f"Plan: {plan_path}")
           print(f"Report: {report_path}")
           PY
