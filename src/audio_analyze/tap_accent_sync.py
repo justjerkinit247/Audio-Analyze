@@ -210,7 +210,8 @@ def build_tap_sync_prompt_block(scene_marker: dict[str, Any]) -> str:
         f"Primary tap-accent times inside this clip: {target_text}. "
         "Use sharp clap, snare, hi-hat, and similar high-frequency tap transients as visible motion triggers. "
         "For dance or twerk-style choreography, reverse hip and glute travel direction on each listed primary tap accent. "
-        "Do not trigger direction changes from kick-drum or bass-only boom hits; hold, travel, or prepare between tap accents.\n"
+        "Do not trigger direction changes from kick-drum or bass-only boom hits; hold, travel, or prepare between tap accents. "
+        "This TAP_SYNC rule overrides any generic kick or full-beat direction-change wording elsewhere in the prompt.\n"
     )
 
 
