@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 import json
+import re
 
 try:
     from .ltx_filename_hint_expander import (
@@ -12,6 +13,7 @@ try:
         MOTION_MARKER,
         clean_scene_hint,
         expand_scene_hint,
+        render_combined_ltx_text,
     )
     from .path_policy import resolve_runtime_path, serialize_path
 except ImportError:
@@ -22,12 +24,19 @@ except ImportError:
         MOTION_MARKER,
         clean_scene_hint,
         expand_scene_hint,
+        render_combined_ltx_text,
     )
     from path_policy import resolve_runtime_path, serialize_path
 
 
 DEFAULT_PLAN_EXPANSION_PROVIDER = "ollama"
 AUDIO_TIMING_MARKER = "[AUDIO_TIMING]"
+SUBJECT_LOCK_MARKER = "[SUBJECT_LOCK]"
+
+FEMALE_TOKENS = {"woman", "female", "girl", "lady"}
+MALE_TOKENS = {"man", "male", "guy", "gentleman"}
+PAIR_TOKENS = {"duet", "pair", "couple", "partners", "partner", "two", "both"}
+GROUP_TOKENS = {"choir", "group", "ensemble", "crowd", "team", "dancers", "performers"}
 
 
 def read_json(path: str | Path) -> dict[str, Any]:
@@ -59,6 +68,163 @@ def _format_bpm(value: Any) -> str:
     if parsed is None:
         return "unknown BPM"
     return f"{parsed:.2f} BPM"
+
+
+def _scene_tokens(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", str(value or "").lower()))
+
+
+def build_subject_count_policy(filename: str, scene_hint: str) -> dict[str, Any]:
+    tokens = _scene_tokens(f"{filename} {scene_hint}")
+    has_female = bool(tokens & FEMALE_TOKENS)
+    has_male = bool(tokens & MALE_TOKENS)
+    has_pair = bool(tokens & PAIR_TOKENS) or (has_female and has_male)
+    has_choir = "choir" in tokens
+    has_group = bool(tokens & GROUP_TOKENS)
+    multiple_subjects = has_pair or has_group
+
+    requirements = [
+        "The seed image is authoritative for subject count and body layout.",
+        "Preserve every visible person from the seed image; do not add, remove, merge, replace, or hide subjects.",
+    ]
+    negative_terms = [
+        "changed subject count",
+        "removed visible subject",
+        "added unrelated subject",
+        "merged people",
+    ]
+
+    if has_pair:
+        requirements.append(
+            "Keep the female lead dancer and male dance partner visible together as the foreground pair for the complete clip."
+        )
+        negative_terms.extend(
+            [
+                "solitary dancer",
+                "solo dancer",
+                "missing dance partner",
+                "missing male dancer",
+                "missing female dancer",
+            ]
+        )
+
+    if has_choir:
+        requirements.append(
+            "Keep the existing choir visible in the background; the choir may clap or sway subtly but must not disappear."
+        )
+        negative_terms.extend(
+            [
+                "missing choir",
+                "removed background performers",
+                "empty cathedral background",
+            ]
+        )
+    elif has_group:
+        requirements.append(
+            "Keep all background group members or performers visible in their original positions."
+        )
+        negative_terms.append("removed background performers")
+
+    if multiple_subjects:
+        requirements.append(
+            "Never describe or render this scene as solitary, solo, lone, alone, or single-person."
+        )
+
+    return {
+        "filename": filename,
+        "scene_hint": scene_hint,
+        "multiple_subjects": multiple_subjects,
+        "has_pair": has_pair,
+        "has_choir": has_choir,
+        "has_group": has_group,
+        "requirements": requirements,
+        "negative_terms": negative_terms,
+    }
+
+
+def render_subject_lock_block(policy: dict[str, Any]) -> str:
+    return f"{SUBJECT_LOCK_MARKER}\n" + " ".join(policy.get("requirements") or []) + "\n"
+
+
+def _merge_negative_terms(existing: str, additions: list[str]) -> str:
+    terms = [part.strip() for part in str(existing or "").split(",") if part.strip()]
+    seen: set[str] = set()
+    merged: list[str] = []
+    for term in terms + list(additions):
+        cleaned = re.sub(r"\s+", " ", str(term or "")).strip().strip(",")
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        merged.append(cleaned)
+    return ", ".join(merged)
+
+
+def enforce_subject_count_in_expansion(
+    expansion: dict[str, Any],
+    *,
+    filename: str,
+    scene_hint: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    policy = build_subject_count_policy(filename, scene_hint)
+    patched = dict(expansion)
+    motion_prompt = re.sub(
+        r"\s+",
+        " ",
+        str(patched.get("ltx_motion_prompt") or "").strip(),
+    )
+    original_motion_prompt = motion_prompt
+
+    if policy["multiple_subjects"]:
+        replacements = (
+            (r"\ba solitary female dancer\b", "the female lead dancer and her male dance partner"),
+            (r"\ba solitary male dancer\b", "the male lead dancer and his female dance partner"),
+            (r"\ba solitary dancer\b", "the visible dance partners"),
+            (r"\bthe solitary female dancer\b", "the female lead dancer and her male dance partner"),
+            (r"\bthe solitary male dancer\b", "the male lead dancer and his female dance partner"),
+            (r"\bthe solitary dancer\b", "the visible dance partners"),
+            (r"\bsolitary\b", ""),
+            (r"\bsolo\b", ""),
+            (r"\blone\b", ""),
+            (r"\balone\b", "with the other visible subjects"),
+        )
+        for pattern, replacement in replacements:
+            motion_prompt = re.sub(pattern, replacement, motion_prompt, flags=re.IGNORECASE)
+        motion_prompt = re.sub(r"\s+", " ", motion_prompt).strip()
+
+        required_motion_sentences: list[str] = []
+        if policy["has_pair"]:
+            required_motion_sentences.append(
+                "The female lead dancer and male dance partner remain visible together throughout the shot; the man maintains a restrained grounded groove beside her."
+            )
+        if policy["has_choir"]:
+            required_motion_sentences.append(
+                "The existing choir remains visible in the background, clapping and swaying subtly without changing subject count."
+            )
+        elif policy["has_group"]:
+            required_motion_sentences.append(
+                "All existing background performers remain visible and maintain restrained supporting motion."
+            )
+        motion_prompt = " ".join(required_motion_sentences + [motion_prompt]).strip()
+
+    negative_prompt = _merge_negative_terms(
+        str(patched.get("negative_prompt") or ""),
+        policy["negative_terms"],
+    )
+
+    patched["filename"] = filename
+    patched["scene_hint"] = scene_hint
+    patched["ltx_motion_prompt"] = motion_prompt
+    patched["negative_prompt"] = negative_prompt
+    patched["combined_ltx_text"] = render_combined_ltx_text(motion_prompt, negative_prompt)
+    patched["subject_count_policy"] = policy
+    if motion_prompt != original_motion_prompt:
+        patched["ltx_motion_prompt_before_subject_count_guard"] = original_motion_prompt
+        notes = list(patched.get("motion_notes") or [])
+        notes.append("subject-count guard removed false solitary/solo wording and restored filename-required subjects")
+        patched["motion_notes"] = notes
+
+    return patched, policy
 
 
 def build_audio_timing_metadata(item: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
@@ -129,18 +295,28 @@ def render_audio_timing_block(audio_timing: dict[str, Any]) -> str:
     )
 
 
-def build_scene_prompt_from_expansion(item: dict[str, Any], plan: dict[str, Any], expansion: dict[str, Any], audio_timing: dict[str, Any] | None = None) -> str:
+def build_scene_prompt_from_expansion(
+    item: dict[str, Any],
+    plan: dict[str, Any],
+    expansion: dict[str, Any],
+    audio_timing: dict[str, Any] | None = None,
+    subject_policy: dict[str, Any] | None = None,
+) -> str:
     file_stem = item.get("file_stem") or plan.get("file_stem") or "ltx_scene"
-    seed_hint = expansion.get("scene_hint") or item.get("seed_filename_prompt_hint") or ""
+    seed_filename = _seed_filename(item)
+    seed_hint = expansion.get("scene_hint") or clean_scene_hint(seed_filename)
     audio_timing = audio_timing or build_audio_timing_metadata(item, plan)
     audio_timing_block = render_audio_timing_block(audio_timing)
+    subject_policy = subject_policy or build_subject_count_policy(seed_filename, seed_hint)
+    subject_lock_block = render_subject_lock_block(subject_policy)
     return (
-        f"Image-to-video continuation for {file_stem}. "
-        "Use the seed image as the visual anchor for subject identity, pose family, camera angle, framing, lighting, and background. "
+        f"Audio-and-image-to-video continuation synchronized to the supplied audio for {file_stem}. "
+        "Use the supplied audio as the timing source and the seed image as the authoritative visual source for subject count, identity, pose family, body layout, camera angle, framing, lighting, and background. "
+        f"Seed image filename used as the Ollama prompt hint: {seed_filename}. "
         f"Seed filename scene direction: {seed_hint}. "
-        "Allow creative cinematic interpretation and natural motion development as long as it remains coherent with the seed image, filename direction, and audio timing. "
-        "Avoid random prior-project assumptions or unrelated characters/settings, but do not over-constrain the shot. "
-        f"\n\n{audio_timing_block}\n{MOTION_MARKER}\n{expansion['ltx_motion_prompt']}\n\n{NEGATIVE_MARKER}\n{expansion['negative_prompt']}\n"
+        "Allow creative motion only within the filename direction, audio timing, subject lock, and visible seed-image composition. "
+        "Do not import assumptions from previous projects or remove subjects that already exist in the seed image. "
+        f"\n\n{subject_lock_block}\n{audio_timing_block}\n{MOTION_MARKER}\n{expansion['ltx_motion_prompt']}\n\n{NEGATIVE_MARKER}\n{expansion['negative_prompt']}\n"
     )
 
 
@@ -163,16 +339,39 @@ def expand_plan_data(
     for raw_item in plan.get("results", []):
         item = dict(raw_item)
         filename = _seed_filename(item)
-        scene_hint = clean_scene_hint(filename) or item.get("seed_filename_prompt_hint") or filename
-        expansion = expander(scene_hint, filename=filename, provider=provider, model=model)
+        scene_hint = clean_scene_hint(filename)
+        if not scene_hint:
+            raise ValueError(f"Seed image filename produced an empty Ollama prompt hint: {filename}")
+
+        raw_expansion = expander(
+            scene_hint,
+            filename=filename,
+            provider=provider,
+            model=model,
+        )
+        expansion, subject_policy = enforce_subject_count_in_expansion(
+            raw_expansion,
+            filename=filename,
+            scene_hint=scene_hint,
+        )
         audio_timing = build_audio_timing_metadata(item, plan)
-        item["seed_filename_prompt_hint"] = expansion.get("scene_hint", scene_hint)
+        item["seed_filename_used_for_prompt_hint"] = filename
+        item["seed_filename_prompt_hint"] = scene_hint
         item["filename_hint_expansion"] = expansion
+        item["subject_count_policy"] = subject_policy
+        item["subject_lock_prompt_block"] = render_subject_lock_block(subject_policy)
         item["audio_timing"] = audio_timing
         item["audio_timing_prompt_block"] = render_audio_timing_block(audio_timing)
         item["prompt_text_before_filename_hint_expansion"] = raw_item.get("prompt_text")
-        item["prompt_text"] = build_scene_prompt_from_expansion(item, plan, expansion, audio_timing=audio_timing)
-        item["prompt_build_method"] = "filename_hint_expansion_with_audio_timing"
+        item["prompt_text"] = build_scene_prompt_from_expansion(
+            item,
+            plan,
+            expansion,
+            audio_timing=audio_timing,
+            subject_policy=subject_policy,
+        )
+        item["prompt_build_method"] = "seed_filename_ollama_expansion_with_audio_timing_and_subject_lock"
+        item["prompt_transport_mode"] = "audio_and_image_to_video"
         item["prompt_expansion_provider"] = provider
         if model:
             item["prompt_expansion_model"] = model
@@ -186,8 +385,12 @@ def expand_plan_data(
         "model": model,
         "scene_count": expansion_count,
         "audio_timing_prompt_blocks": "applied",
+        "subject_lock_prompt_blocks": "applied",
+        "seed_filename_source": "exact_seed_image_basename",
+        "transport_mode": "audio_and_image_to_video",
     }
-    patched["prompt_build_method"] = "filename_hint_expansion_with_audio_timing"
+    patched["prompt_build_method"] = "seed_filename_ollama_expansion_with_audio_timing_and_subject_lock"
+    patched["prompt_transport_mode"] = "audio_and_image_to_video"
     return patched
 
 
