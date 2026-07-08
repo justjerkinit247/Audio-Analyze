@@ -1,0 +1,186 @@
+name: Pipeline Validation
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      test_scope:
+        description: Validation scope
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Compile, targeted tests, and dry pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile source and tests
+        env:
+          PYTHONPATH: src
+        run: python -m compileall -q src tests
+
+      - name: Run current LTX and ASMO tests
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m pytest -q \
+            tests/test_asmo_engine_smoke.py \
+            tests/test_ltx_auto_audio_orchestrator.py \
+            tests/test_ltx_plan_prompt_expander.py \
+            tests/test_ltx_filename_hint_expander.py \
+            tests/test_ltx_filename_hint_expander_ollama.py \
+            tests/test_local_ai_client.py \
+            tests/test_asmo_negative_prompt_memory.py
+
+      - name: Create deterministic CI media fixtures
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          import numpy as np
+          from PIL import Image
+          from scipy.io import wavfile
+
+          audio_dir = Path("inputs/audio")
+          seed_dir = Path("inputs/ltx_seed_images")
+          audio_dir.mkdir(parents=True, exist_ok=True)
+          seed_dir.mkdir(parents=True, exist_ok=True)
+
+          sample_rate = 22050
+          duration_seconds = 8
+          timeline = np.arange(sample_rate * duration_seconds, dtype=np.float64) / sample_rate
+          tone = 0.20 * np.sin(2.0 * np.pi * 220.0 * timeline)
+          click_interval = sample_rate // 2
+          for start in range(0, tone.size, click_interval):
+              stop = min(start + 220, tone.size)
+              tone[start:stop] += np.linspace(0.50, 0.0, stop - start)
+          pcm = np.clip(tone, -1.0, 1.0)
+          wavfile.write(audio_dir / "ci_pipeline_fixture.wav", sample_rate, (pcm * 32767).astype(np.int16))
+
+          image = Image.new("RGB", (576, 1024), (32, 48, 64))
+          image.save(seed_dir / "scene_01_subject_moves_on_beat.png")
+          PY
+
+      - name: Run one-scene offline pipeline dry run
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m audio_analyze.ltx_auto_audio_orchestrator \
+            --seed-dir inputs/ltx_seed_images \
+            --output-plan outputs/ltx_video_run/ci_pipeline_plan.json \
+            --report-json outputs/ltx_video_run/ci_pipeline_report.json \
+            --resolution 9:16 \
+            --max-scenes 1 \
+            --scene-seconds 4 \
+            --model ltx-2-3-pro \
+            --guidance-scale 9.0 \
+            --filename-hint-provider template \
+            --allow-sorted-seed-fallback
+
+      - name: Validate dry-run artifacts and prompt contract
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          plan_path = Path("outputs/ltx_video_run/ci_pipeline_plan.json")
+          report_path = Path("outputs/ltx_video_run/ci_pipeline_report.json")
+          assert plan_path.is_file(), f"Missing plan: {plan_path}"
+          assert report_path.is_file(), f"Missing report: {report_path}"
+
+          plan = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+          report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+          results = plan.get("results") or []
+          assert results, "Dry-run plan contains no scene results"
+
+          scene = results[0]
+          prompt = str(scene.get("prompt_text") or "")
+          for marker in ("[AUDIO_TIMING]", "[MOTION_PROMPT]", "[NEGATIVE_PROMPT]"):
+              assert marker in prompt, f"Active prompt is missing {marker}"
+
+          assert plan.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the plan"
+          assert report.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the report"
+          assert report.get("status") == "complete", f"Unexpected report status: {report.get('status')}"
+          assert report.get("live") is False, "Validation unexpectedly performed a live run"
+          assert scene.get("prompt_build_method") == "filename_hint_expansion_with_audio_timing", (
+              f"Unexpected prompt build method: {scene.get('prompt_build_method')}"
+          )
+
+          print("Offline pipeline validation passed")
+          print(f"Plan: {plan_path}")
+          print(f"Report: {report_path}")
+          PY
+
+      - name: Upload dry-run evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-dry-run-${{ github.run_id }}
+          path: |
+            outputs/ltx_video_run/ci_pipeline_plan.json
+            outputs/ltx_video_run/ci_pipeline_report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  full-suite:
+    name: Full pytest suite
+    if: github.event_name == 'workflow_dispatch' && inputs.test_scope == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile everything
+        env:
+          PYTHONPATH: src
+        run: python -m compileall -q src tests
+
+      - name: Run full test suite
+        env:
+          PYTHONPATH: src
+        run: python -m pytest -q
