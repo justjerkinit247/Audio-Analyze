@@ -142,7 +142,7 @@ jobs:
 
           scene = results[0]
           prompt = str(scene.get("prompt_text") or "")
-          for marker in ("[AUDIO_TIMING]", "[TAP_SYNC]", "[MOTION_PROMPT]", "[NEGATIVE_PROMPT]"):
+          for marker in ("[SUBJECT_LOCK]", "[AUDIO_TIMING]", "[TAP_SYNC]", "[MOTION_PROMPT]", "[NEGATIVE_PROMPT]"):
               assert marker in prompt, f"Active prompt is missing {marker}"
 
           tap_summary = plan.get("tap_sync") or {}
@@ -160,12 +160,25 @@ jobs:
           assert report.get("tap_accent_sync_requested") is True, "Tap-accent sync was not requested"
           assert report.get("status") == "complete", f"Unexpected report status: {report.get('status')}"
           assert report.get("live") is False, "Validation unexpectedly performed a live run"
-          assert scene.get("prompt_build_method") == "filename_hint_expansion_with_audio_timing", (
+          assert scene.get("prompt_build_method") == "seed_filename_ollama_expansion_with_audio_timing_and_subject_lock", (
               f"Unexpected prompt build method: {scene.get('prompt_build_method')}"
           )
+          assert scene.get("prompt_transport_mode") == "audio_and_image_to_video", (
+              f"Unexpected transport mode: {scene.get('prompt_transport_mode')}"
+          )
+          expected_seed = "scene_01_subject_moves_on_tap_accents.png"
+          assert scene.get("seed_filename_used_for_prompt_hint") == expected_seed, (
+              f"Wrong seed filename prompt source: {scene.get('seed_filename_used_for_prompt_hint')}"
+          )
+          assert prompt.startswith("Audio-and-image-to-video continuation synchronized to the supplied audio"), (
+              "Active prompt still uses the old image-to-video header"
+          )
+          assert f"Seed image filename used as the Ollama prompt hint: {expected_seed}." in prompt
+          assert "The seed image is authoritative for subject count and body layout." in prompt
 
-          print("Offline tap-not-boom pipeline validation passed")
+          print("Offline tap-not-boom audio-and-image pipeline validation passed")
           print(f"Selected tap times: {scene_tap.get('tap_accent_times_seconds')}")
+          print(f"Seed filename prompt source: {scene.get('seed_filename_used_for_prompt_hint')}")
           print(f"Plan: {plan_path}")
           print(f"Report: {report_path}")
           PY
