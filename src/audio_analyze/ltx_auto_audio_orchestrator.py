@@ -28,6 +28,10 @@ def _load_negative_memory_module():
     return importlib.import_module(".asmo_negative_prompt_memory", __package__)
 
 
+def _load_tap_sync_module():
+    return importlib.import_module(".tap_accent_sync", __package__)
+
+
 def write_json(path, data):
     path_policy = _load_path_policy_module()
     path = path_policy.resolve_runtime_path(path)
@@ -56,7 +60,11 @@ def find_newest_audio(audio_dir=DEFAULT_AUDIO_DIR):
             f"No supported audio files found in {audio_dir.resolve()}. Supported extensions: {allowed}"
         )
 
-    return sorted(candidates, key=lambda path: (path.stat().st_mtime, path.name.lower()), reverse=True)[0]
+    return sorted(
+        candidates,
+        key=lambda path: (path.stat().st_mtime, path.name.lower()),
+        reverse=True,
+    )[0]
 
 
 def resolve_audio_argument(audio=None, audio_dir=DEFAULT_AUDIO_DIR):
@@ -78,11 +86,20 @@ def _output_json_from_build_plan_call(args, kwargs):
     raise TypeError("Could not determine output_json from build_plan call.")
 
 
+def _audio_path_from_build_plan_call(args, kwargs):
+    if "audio_path" in kwargs:
+        return kwargs["audio_path"]
+    if args:
+        return args[0]
+    raise TypeError("Could not determine audio_path from build_plan call.")
+
+
 def _patch_plan_after_old_build_plan(
     original_build_plan,
     filename_hint_provider="ollama",
     filename_hint_model="gemma3:4b",
     apply_asmo_negative_memory=True,
+    apply_tap_accent_sync=True,
     state_root=DEFAULT_STATE_ROOT,
 ):
     """Wrap the old build_plan function without replacing the old orchestrator flow."""
@@ -90,6 +107,7 @@ def _patch_plan_after_old_build_plan(
     def wrapped_build_plan(*args, **kwargs):
         plan = original_build_plan(*args, **kwargs)
         output_json = _output_json_from_build_plan_call(args, kwargs)
+        audio_path = _audio_path_from_build_plan_call(args, kwargs)
 
         plan_expander = _load_plan_expander_module()
         patched = plan_expander.expand_plan_data(
@@ -100,13 +118,35 @@ def _patch_plan_after_old_build_plan(
 
         if apply_asmo_negative_memory:
             negative_memory = _load_negative_memory_module()
-            patched = negative_memory.apply_negative_memory_to_plan_data(patched, state_root=state_root)
+            patched = negative_memory.apply_negative_memory_to_plan_data(
+                patched,
+                state_root=state_root,
+            )
             patched["asmo_negative_memory_applied"] = True
         else:
             patched["asmo_negative_memory_applied"] = False
 
+        if apply_tap_accent_sync:
+            tap_sync = _load_tap_sync_module()
+            markers = tap_sync.extract_tap_beat_markers(audio_path, patched)
+            patched = tap_sync.apply_tap_sync_to_plan_data(
+                patched,
+                audio_path=audio_path,
+                markers=markers,
+            )
+            patched["tap_accent_sync_applied"] = True
+        else:
+            patched["tap_accent_sync_applied"] = False
+
         write_json(output_json, patched)
-        print(f"Filename-hint expansion applied through old orchestrator build_plan: {patched.get('filename_hint_expansion')}")
+        print(
+            "Filename-hint expansion applied through old orchestrator build_plan: "
+            f"{patched.get('filename_hint_expansion')}"
+        )
+        print(
+            "Tap-accent sync policy: "
+            f"{(patched.get('tap_sync') or {}).get('policy', 'disabled')}"
+        )
         return patched
 
     return wrapped_build_plan
@@ -131,6 +171,7 @@ def run_auto_audio_orchestrator(
     filename_hint_provider="ollama",
     filename_hint_model="gemma3:4b",
     apply_asmo_negative_memory=True,
+    apply_tap_accent_sync=True,
     state_root=DEFAULT_STATE_ROOT,
 ):
     pipeline = _load_pipeline_module()
@@ -138,19 +179,35 @@ def run_auto_audio_orchestrator(
     path_policy = _load_path_policy_module()
 
     selected_report_json = report_json or orchestrator.DEFAULT_ORCHESTRATOR_REPORT_JSON
-    audio_path, audio_selection_method = resolve_audio_argument(audio, audio_dir=audio_dir)
+    audio_path, audio_selection_method = resolve_audio_argument(
+        audio,
+        audio_dir=audio_dir,
+    )
     print(f"Auto audio selection method: {audio_selection_method}")
     print(f"Audio selected: {audio_path.resolve()}")
     print(f"Beat alignment enabled: {bool(beat_align)}")
+    print(f"Tap-accent sync enabled: {bool(apply_tap_accent_sync)}")
 
     original_build_plan = orchestrator.build_plan
+    original_extract_beat_markers = orchestrator.extract_beat_markers
+    original_choreography_builder = orchestrator.build_beat_camera_choreography_manifest
+
     orchestrator.build_plan = _patch_plan_after_old_build_plan(
         original_build_plan,
         filename_hint_provider=filename_hint_provider,
         filename_hint_model=filename_hint_model,
         apply_asmo_negative_memory=apply_asmo_negative_memory,
+        apply_tap_accent_sync=apply_tap_accent_sync,
         state_root=state_root,
     )
+
+    if apply_tap_accent_sync:
+        tap_sync = _load_tap_sync_module()
+        orchestrator.extract_beat_markers = tap_sync.extract_tap_beat_markers
+        orchestrator.build_beat_camera_choreography_manifest = (
+            tap_sync.wrap_choreography_manifest(original_choreography_builder)
+        )
+
     try:
         result = orchestrator.orchestrate(
             audio=path_policy.serialize_path(audio_path),
@@ -158,9 +215,17 @@ def run_auto_audio_orchestrator(
             output_plan=output_plan or orchestrator.DEFAULT_PLAN_JSON,
             resolution=resolution,
             max_scenes=max_scenes,
-            scene_seconds=scene_seconds if scene_seconds is not None else pipeline.DEFAULT_SCENE_SECONDS,
+            scene_seconds=(
+                scene_seconds
+                if scene_seconds is not None
+                else pipeline.DEFAULT_SCENE_SECONDS
+            ),
             model=model or pipeline.DEFAULT_MODEL,
-            guidance_scale=guidance_scale if guidance_scale is not None else pipeline.DEFAULT_GUIDANCE_SCALE,
+            guidance_scale=(
+                guidance_scale
+                if guidance_scale is not None
+                else pipeline.DEFAULT_GUIDANCE_SCALE
+            ),
             live=live,
             report_json=selected_report_json,
             start_offset_seconds=start_offset_seconds,
@@ -170,6 +235,10 @@ def run_auto_audio_orchestrator(
         )
     finally:
         orchestrator.build_plan = original_build_plan
+        orchestrator.extract_beat_markers = original_extract_beat_markers
+        orchestrator.build_beat_camera_choreography_manifest = (
+            original_choreography_builder
+        )
 
     result["audio_selection_method"] = audio_selection_method
     result["auto_selected_audio"] = path_policy.serialize_path(audio_path)
@@ -179,6 +248,10 @@ def run_auto_audio_orchestrator(
     result["filename_hint_provider"] = filename_hint_provider
     result["filename_hint_model"] = filename_hint_model
     result["asmo_negative_memory_requested"] = bool(apply_asmo_negative_memory)
+    result["tap_accent_sync_requested"] = bool(apply_tap_accent_sync)
+    result["tap_sync_policy"] = (
+        "tap_not_boom" if apply_tap_accent_sync else "disabled"
+    )
     write_json(selected_report_json, result)
     return result
 
@@ -188,27 +261,61 @@ def main():
     orchestrator = _load_orchestrator_module()
 
     parser = argparse.ArgumentParser(
-        description="LTX wrapper that auto-selects audio, then runs the old orchestrator with filename-hint prompt expansion wired into build_plan."
+        description=(
+            "LTX wrapper that auto-selects audio, then runs the old orchestrator "
+            "with filename-hint expansion and tap-accent motion sync wired into build_plan."
+        )
     )
-    parser.add_argument("--audio", default=None, help="Optional explicit audio path. If omitted, newest file in --audio-dir is used.")
+    parser.add_argument(
+        "--audio",
+        default=None,
+        help="Optional explicit audio path. If omitted, newest file in --audio-dir is used.",
+    )
     parser.add_argument("--audio-dir", default=DEFAULT_AUDIO_DIR)
     parser.add_argument("--seed-dir", default=pipeline.DEFAULT_SEED_DIR)
     parser.add_argument("--output-plan", default=orchestrator.DEFAULT_PLAN_JSON)
     parser.add_argument("--resolution", default="9:16")
     parser.add_argument("--max-scenes", type=int, default=None)
-    parser.add_argument("--scene-seconds", type=float, default=pipeline.DEFAULT_SCENE_SECONDS)
+    parser.add_argument(
+        "--scene-seconds",
+        type=float,
+        default=pipeline.DEFAULT_SCENE_SECONDS,
+    )
     parser.add_argument("--start-offset-seconds", type=float, default=0.0)
-    parser.add_argument("--no-beat-align", action="store_true", help="Disable default beat-aligned scene timing and use fixed scene intervals.")
+    parser.add_argument(
+        "--no-beat-align",
+        action="store_true",
+        help="Disable default beat-aligned scene timing and use fixed scene intervals.",
+    )
     parser.add_argument("--model", default=pipeline.DEFAULT_MODEL)
-    parser.add_argument("--guidance-scale", type=float, default=pipeline.DEFAULT_GUIDANCE_SCALE)
+    parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=pipeline.DEFAULT_GUIDANCE_SCALE,
+    )
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--allow-sorted-seed-fallback", action="store_true")
     parser.add_argument("--allow-duplicate-seed-reuse", action="store_true")
-    parser.add_argument("--report-json", default=orchestrator.DEFAULT_ORCHESTRATOR_REPORT_JSON)
-    parser.add_argument("--filename-hint-provider", default="ollama", choices=["template", "openai", "ollama"])
+    parser.add_argument(
+        "--report-json",
+        default=orchestrator.DEFAULT_ORCHESTRATOR_REPORT_JSON,
+    )
+    parser.add_argument(
+        "--filename-hint-provider",
+        default="ollama",
+        choices=["template", "openai", "ollama"],
+    )
     parser.add_argument("--filename-hint-model", default="gemma3:4b")
     parser.add_argument("--state-root", default=DEFAULT_STATE_ROOT)
     parser.add_argument("--no-asmo-negative-memory", action="store_true")
+    parser.add_argument(
+        "--no-tap-accent-sync",
+        action="store_true",
+        help=(
+            "Disable clap/snare/hi-hat tap-accent motion targeting and use the "
+            "legacy percussive beat-grid behavior."
+        ),
+    )
     args = parser.parse_args()
 
     run_auto_audio_orchestrator(
@@ -230,6 +337,7 @@ def main():
         filename_hint_provider=args.filename_hint_provider,
         filename_hint_model=args.filename_hint_model,
         apply_asmo_negative_memory=not args.no_asmo_negative_memory,
+        apply_tap_accent_sync=not args.no_tap_accent_sync,
         state_root=args.state_root,
     )
 
