@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
+import re
 
 import librosa
 import numpy as np
@@ -20,12 +21,85 @@ DEFAULT_HIGH_BAND_HZ = 1200.0
 DEFAULT_MIN_HIGH_RATIO = 0.22
 DEFAULT_MIN_SPACING_SECONDS = 0.08
 
+LOCALIZED_GLUTE_TOKENS = {
+    "twerk",
+    "twerking",
+    "glute",
+    "glutes",
+    "cheek",
+    "cheeks",
+    "booty",
+    "rump",
+}
+
+LOCALIZED_GLUTE_NEGATIVE_TERMS = [
+    "static opening frame",
+    "frozen first frames",
+    "delayed motion onset",
+    "motionless first half",
+    "waiting before movement",
+    "jumping",
+    "hopping",
+    "feet leaving the floor",
+    "heels lifting",
+    "standing up",
+    "repeated squats",
+    "whole-body bouncing",
+    "vertical pelvic bouncing",
+    "full-body pumping",
+    "large vertical displacement",
+]
+
 
 def _scalar(value: Any) -> float:
     array = np.asarray(value)
     if array.size == 0:
         return 0.0
     return float(array.reshape(-1)[0])
+
+
+def _scene_hint_for_item(item: dict[str, Any]) -> str:
+    expansion = item.get("filename_hint_expansion") or {}
+    assignment = item.get("seed_assignment") or {}
+    return str(
+        expansion.get("scene_hint")
+        or item.get("seed_filename_prompt_hint")
+        or assignment.get("filename_prompt_hint")
+        or item.get("seed_image_used")
+        or ""
+    )
+
+
+def is_localized_glute_scene(scene_hint: str) -> bool:
+    tokens = set(re.findall(r"[a-z0-9]+", str(scene_hint or "").lower()))
+    if tokens & LOCALIZED_GLUTE_TOKENS:
+        return True
+    has_hip_or_pelvis = bool(tokens & {"hip", "hips", "pelvis", "pelvic"})
+    has_squat_or_lower_body = bool(tokens & {"squat", "squatting", "lower", "body"})
+    return has_hip_or_pelvis and has_squat_or_lower_body
+
+
+def merge_negative_prompt_terms(prompt_text: str, extra_terms: list[str]) -> str:
+    prompt_text = str(prompt_text or "")
+    if NEGATIVE_MARKER not in prompt_text:
+        return prompt_text
+
+    before, current_negative = prompt_text.split(NEGATIVE_MARKER, 1)
+    existing = [
+        term.strip()
+        for term in current_negative.replace("\n", " ").split(",")
+        if term.strip()
+    ]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for term in existing + list(extra_terms):
+        cleaned = re.sub(r"\s+", " ", str(term or "")).strip().strip(",")
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        merged.append(cleaned)
+    return f"{before.rstrip()}\n\n{NEGATIVE_MARKER}\n{', '.join(merged)}\n"
 
 
 def select_tap_accent_targets(
@@ -200,16 +274,36 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
     }
 
 
-def build_tap_sync_prompt_block(scene_marker: dict[str, Any]) -> str:
+def build_tap_sync_prompt_block(
+    scene_marker: dict[str, Any],
+    *,
+    scene_hint: str = "",
+) -> str:
     targets = scene_marker.get("primary_sync_targets_relative_seconds") or []
     target_text = ", ".join(f"{float(value):.3f}s" for value in targets)
     if not target_text:
         target_text = "no reliable tap accents detected"
+
+    if is_localized_glute_scene(scene_hint):
+        return (
+            f"{TAP_SYNC_MARKER}\n"
+            f"Primary tap-accent times inside this clip: {target_text}. "
+            "Visible dance motion begins immediately at 0.00 seconds and continues throughout the entire clip; never hold the seed image as a static opening. "
+            "At every listed clap, snare, hi-hat, or sharp tap accent, perform one compact localized twerk pulse: a brief glute-cheek contraction, a small backward pelvis pop, and a controlled recoil. "
+            "Alternate left and right glute-cheek emphasis only when physically natural, while keeping the motion isolated below the waist. "
+            "Both feet remain planted, heels remain down, knees stay bent, and the dancer remains in the same squat pose family. "
+            "Keep head, shoulders, chest, torso, and overall body height nearly constant; the accent comes from the glutes and pelvis, not from moving the whole body upward. "
+            "Between listed accents, maintain subtle continuous pelvic micro-motion and a small controlled hip sway so the image never freezes while waiting for the next tap. "
+            "Do not convert the accents into jumping, hopping, standing up, repeated squats, whole-body bouncing, vertical pumping, or feet leaving the floor. "
+            "Do not use kick-drum or bass-only boom hits as major movement triggers. "
+            "This TAP_SYNC instruction overrides generic jumping, bouncing, kick-driven, full-body, or vertical direction-change wording elsewhere in the prompt.\n"
+        )
+
     return (
         f"{TAP_SYNC_MARKER}\n"
         f"Primary tap-accent times inside this clip: {target_text}. "
         "Use sharp clap, snare, hi-hat, and similar high-frequency tap transients as visible motion triggers. "
-        "For dance or twerk-style choreography, reverse hip and glute travel direction on each listed primary tap accent. "
+        "Land controlled visible action changes on each listed primary tap accent. "
         "Do not trigger direction changes from kick-drum or bass-only boom hits; hold, travel, or prepare between tap accents. "
         "This TAP_SYNC rule overrides any generic kick or full-beat direction-change wording elsewhere in the prompt.\n"
     )
@@ -246,13 +340,30 @@ def apply_tap_sync_to_plan_data(
     }
     patched = deepcopy(plan)
     results: list[dict[str, Any]] = []
+    profile_counts = {"localized_glute_pulse": 0, "generic_tap_action": 0}
+
     for raw_item in plan.get("results", []):
         item = deepcopy(raw_item)
-        scene_marker = by_clip.get(int(item.get("clip_index", 0)), {})
-        block = build_tap_sync_prompt_block(scene_marker)
+        scene_marker = deepcopy(by_clip.get(int(item.get("clip_index", 0)), {}))
+        scene_hint = _scene_hint_for_item(item)
+        localized_glute = is_localized_glute_scene(scene_hint)
+        motion_profile = "localized_glute_pulse" if localized_glute else "generic_tap_action"
+        profile_counts[motion_profile] += 1
+        scene_marker["motion_profile"] = motion_profile
+        scene_marker["scene_hint"] = scene_hint
+
+        block = build_tap_sync_prompt_block(scene_marker, scene_hint=scene_hint)
+        prompt_text = insert_tap_sync_prompt(item.get("prompt_text", ""), block)
+        if localized_glute:
+            prompt_text = merge_negative_prompt_terms(
+                prompt_text,
+                LOCALIZED_GLUTE_NEGATIVE_TERMS,
+            )
+
         item["tap_sync"] = scene_marker
         item["tap_sync_prompt_block"] = block
-        item["prompt_text"] = insert_tap_sync_prompt(item.get("prompt_text", ""), block)
+        item["tap_motion_profile"] = motion_profile
+        item["prompt_text"] = prompt_text
         results.append(item)
 
     patched["results"] = results
@@ -262,6 +373,7 @@ def apply_tap_sync_to_plan_data(
         "primary_source": "high_frequency_percussive_onsets",
         "candidate_count": markers.get("tap_accent_candidate_count", 0),
         "scene_count": len(results),
+        "motion_profile_counts": profile_counts,
     }
     return patched
 
@@ -272,23 +384,47 @@ def wrap_choreography_manifest(
     def wrapped(plan: dict[str, Any], beat_markers=None):
         manifest = original_builder(plan, beat_markers=beat_markers)
         manifest["sync_policy"] = "tap_not_boom"
+        plan_items = {
+            int(item.get("clip_index", 0)): item
+            for item in plan.get("results", [])
+        }
         for scene in manifest.get("scenes", []):
+            clip_index = int(scene.get("clip_index", 0))
+            plan_item = plan_items.get(clip_index, {})
+            motion_profile = plan_item.get("tap_motion_profile") or "generic_tap_action"
+            scene["motion_profile"] = motion_profile
             scene["beat_sync_rule"] = (
-                "Visible direction changes land on sharp clap/snare/hi-hat-like tap accents, "
-                "including off-grid accents; kick/bass-only boom hits do not trigger direction changes."
+                "Visible action accents land on sharp clap/snare/hi-hat-like tap accents, "
+                "including off-grid accents; kick/bass-only boom hits do not trigger major direction changes."
             )
-            scene["dance_direction_change_rule"] = (
-                "For twerk or lower-body dance choreography, reverse hip/glute travel "
-                "direction on every listed primary tap accent."
-            )
-            scene["negative_motion_rules"] = [
-                "no kick-drum or bass-only direction changes",
-                "no drifting through a listed tap accent without a visible response",
-                "no random shaking between tap accents",
-                "no chaotic camera spin",
-                "no warped anatomy",
-                "no random background or body layout mutation",
-            ]
+            if motion_profile == "localized_glute_pulse":
+                scene["dance_direction_change_rule"] = (
+                    "Each listed tap triggers a compact isolated glute-cheek contraction, "
+                    "small backward pelvis pop, and controlled recoil while feet stay planted "
+                    "and overall body height remains stable."
+                )
+                scene["negative_motion_rules"] = [
+                    "no jumping or hopping",
+                    "no feet leaving the floor or heels lifting",
+                    "no standing up or repeated squats",
+                    "no whole-body bouncing or vertical pumping",
+                    "no frozen opening or delayed motion onset",
+                    "no kick-drum or bass-only major movement triggers",
+                    "no warped anatomy",
+                    "no random background or body layout mutation",
+                ]
+            else:
+                scene["dance_direction_change_rule"] = (
+                    "Land controlled visible action changes on every listed primary tap accent."
+                )
+                scene["negative_motion_rules"] = [
+                    "no kick-drum or bass-only direction changes",
+                    "no drifting through a listed tap accent without a visible response",
+                    "no random shaking between tap accents",
+                    "no chaotic camera spin",
+                    "no warped anatomy",
+                    "no random background or body layout mutation",
+                ]
         return manifest
 
     return wrapped
