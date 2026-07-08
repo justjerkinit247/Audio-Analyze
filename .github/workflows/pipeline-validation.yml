@@ -133,7 +133,7 @@ jobs:
           assert plan.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the plan"
           assert report.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the report"
           assert report.get("status") == "complete", f"Unexpected report status: {report.get('status')}"
-          assert report.get("dry_run") is True, "Validation unexpectedly performed a live run"
+          assert report.get("live") is False, "Validation unexpectedly performed a live run"
           assert scene.get("prompt_build_method") == "filename_hint_expansion_with_audio_timing", (
               f"Unexpected prompt build method: {scene.get('prompt_build_method')}"
           )
