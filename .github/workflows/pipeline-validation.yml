@@ -81,17 +81,31 @@ jobs:
 
           sample_rate = 22050
           duration_seconds = 8
-          timeline = np.arange(sample_rate * duration_seconds, dtype=np.float64) / sample_rate
-          tone = 0.20 * np.sin(2.0 * np.pi * 220.0 * timeline)
-          click_interval = sample_rate // 2
-          for start in range(0, tone.size, click_interval):
-              stop = min(start + 220, tone.size)
-              tone[start:stop] += np.linspace(0.50, 0.0, stop - start)
-          pcm = np.clip(tone, -1.0, 1.0)
+          track = np.zeros(sample_rate * duration_seconds, dtype=np.float64)
+
+          # Bass-heavy boom events on the half-seconds.
+          for second in (0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5):
+              start = int(second * sample_rate)
+              length = int(0.15 * sample_rate)
+              envelope = np.exp(-np.arange(length) / (0.03 * sample_rate))
+              kick = 0.75 * np.sin(2.0 * np.pi * 60.0 * np.arange(length) / sample_rate)
+              track[start:start + length] += kick * envelope
+
+          # Sharp high-frequency tap events on the whole seconds.
+          rng = np.random.default_rng(20260708)
+          for second in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0):
+              start = int(second * sample_rate)
+              length = int(0.05 * sample_rate)
+              envelope = np.exp(-np.arange(length) / (0.012 * sample_rate))
+              noise = rng.normal(size=length)
+              high_tap = np.concatenate(([noise[0]], np.diff(noise)))
+              track[start:start + length] += 0.45 * high_tap * envelope
+
+          pcm = np.clip(track, -1.0, 1.0)
           wavfile.write(audio_dir / "ci_pipeline_fixture.wav", sample_rate, (pcm * 32767).astype(np.int16))
 
           image = Image.new("RGB", (576, 1024), (32, 48, 64))
-          image.save(seed_dir / "scene_01_subject_moves_on_beat.png")
+          image.save(seed_dir / "scene_01_subject_moves_on_tap_accents.png")
           PY
 
       - name: Run one-scene offline pipeline dry run
@@ -131,8 +145,16 @@ jobs:
           for marker in ("[AUDIO_TIMING]", "[TAP_SYNC]", "[MOTION_PROMPT]", "[NEGATIVE_PROMPT]"):
               assert marker in prompt, f"Active prompt is missing {marker}"
 
+          tap_summary = plan.get("tap_sync") or {}
+          scene_tap = scene.get("tap_sync") or {}
           assert plan.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the plan"
-          assert (plan.get("tap_sync") or {}).get("policy") == "tap_not_boom", "Plan tap-sync policy is missing"
+          assert tap_summary.get("policy") == "tap_not_boom", "Plan tap-sync policy is missing"
+          assert int(tap_summary.get("candidate_count") or 0) > 0, "No high-frequency tap candidates were detected"
+          assert scene_tap.get("primary_sync_source") == "high_frequency_percussive_onsets", (
+              f"Tap detector fell back to the beat grid: {scene_tap.get('primary_sync_source')}"
+          )
+          assert scene_tap.get("tap_accent_times_seconds"), "Scene has no selected tap accents"
+          assert "overrides any generic kick" in prompt, "Tap policy does not override generic kick wording"
           assert report.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the report"
           assert report.get("tap_sync_policy") == "tap_not_boom", "Report tap-sync policy is missing"
           assert report.get("tap_accent_sync_requested") is True, "Tap-accent sync was not requested"
@@ -142,7 +164,8 @@ jobs:
               f"Unexpected prompt build method: {scene.get('prompt_build_method')}"
           )
 
-          print("Offline tap-accent pipeline validation passed")
+          print("Offline tap-not-boom pipeline validation passed")
+          print(f"Selected tap times: {scene_tap.get('tap_accent_times_seconds')}")
           print(f"Plan: {plan_path}")
           print(f"Report: {report_path}")
           PY
