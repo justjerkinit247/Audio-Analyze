@@ -19,6 +19,11 @@ from .ltx_auto_audio_orchestrator import (
     run_auto_audio_orchestrator,
     submit_fresh_run_plan,
 )
+from .ltx_choreography_profiles import (
+    AUTO_PROFILE,
+    PROFILE_ENV_VAR,
+    normalize_requested_profile,
+)
 
 
 DEFAULT_MODEL = "ltx-2-3-pro"
@@ -122,7 +127,6 @@ def _ensure_ollama(url: str, model: str) -> None:
             tags = read_tags()
             if tags is not None:
                 break
-
     if tags is None:
         raise RuntimeError("Ollama did not start or respond.")
 
@@ -183,22 +187,25 @@ def _validate_plan(
             if marker not in prompt:
                 problems.append(f"prompt is missing {marker}")
 
-        policy = scene.get("subject_count_policy") or {}
-        motion = str((scene.get("filename_hint_expansion") or {}).get("ltx_motion_prompt") or "")
-        if policy.get("multiple_subjects") and any(
-            token in motion.lower() for token in ("solitary", "solo dancer", "lone dancer")
+        subject_policy = scene.get("subject_count_policy") or {}
+        motion = str(
+            (scene.get("filename_hint_expansion") or {}).get("ltx_motion_prompt") or ""
+        )
+        if subject_policy.get("multiple_subjects") and any(
+            token in motion.lower()
+            for token in ("solitary", "solo dancer", "lone dancer")
         ):
             problems.append("multiple-subject scene still contains solo/solitary wording")
 
-        if scene.get("tap_motion_profile") == "localized_glute_pulse":
-            for phrase in (
-                "compact localized twerk pulse",
-                "glute-cheek contraction",
-                "Both feet remain planted",
-                "Do not convert the accents into jumping",
-            ):
-                if phrase not in prompt:
-                    problems.append(f"localized glute prompt is missing: {phrase}")
+        choreography_policy = scene.get("choreography_policy") or {}
+        profile_id = choreography_policy.get("profile_id") or scene.get(
+            "tap_motion_profile"
+        )
+        for phrase in choreography_policy.get("required_prompt_phrases") or []:
+            if phrase not in prompt:
+                problems.append(
+                    f"choreography profile {profile_id!r} prompt is missing: {phrase}"
+                )
 
     if problems:
         raise RuntimeError(
@@ -243,7 +250,10 @@ def run_interactive(args: argparse.Namespace) -> int:
     repo = _repo_root()
     audio = Path(args.audio).expanduser().resolve() if args.audio else _choose_file(
         "Select the source audio",
-        [("Audio files", "*.wav *.mp3 *.flac *.m4a *.aac *.ogg *.aiff *.aif"), ("All files", "*.*")],
+        [
+            ("Audio files", "*.wav *.mp3 *.flac *.m4a *.aac *.ogg *.aiff *.aif"),
+            ("All files", "*.*"),
+        ],
         repo / "inputs" / "audio",
     )
     seed = Path(args.seed).expanduser().resolve() if args.seed else _choose_file(
@@ -261,6 +271,7 @@ def run_interactive(args: argparse.Namespace) -> int:
     if start_offset < 0:
         raise ValueError("Audio starting second cannot be negative.")
 
+    requested_profile = normalize_requested_profile(args.choreography_profile)
     _ensure_ollama(args.ollama_url, args.ollama_model)
 
     paths = _make_run_paths(repo)
@@ -272,24 +283,33 @@ def run_interactive(args: argparse.Namespace) -> int:
     print(f"Run ID: {paths.run_id}")
     print(f"Audio: {audio.name}")
     print(f"Seed: {seed.name}")
+    print(f"Choreography policy request: {requested_profile}")
 
-    report = run_auto_audio_orchestrator(
-        audio=audio,
-        seed_dir=paths.seed_dir,
-        output_plan=paths.plan,
-        report_json=paths.report,
-        run_id=paths.run_id,
-        resolution="9:16",
-        max_scenes=1,
-        scene_seconds=args.scene_seconds,
-        start_offset_seconds=start_offset,
-        model=args.model,
-        guidance_scale=args.guidance_scale,
-        filename_hint_provider="ollama",
-        filename_hint_model=args.ollama_model,
-        allow_sorted_seed_fallback=True,
-        live=False,
-    )
+    previous_profile = os.environ.get(PROFILE_ENV_VAR)
+    os.environ[PROFILE_ENV_VAR] = requested_profile
+    try:
+        report = run_auto_audio_orchestrator(
+            audio=audio,
+            seed_dir=paths.seed_dir,
+            output_plan=paths.plan,
+            report_json=paths.report,
+            run_id=paths.run_id,
+            resolution="9:16",
+            max_scenes=1,
+            scene_seconds=args.scene_seconds,
+            start_offset_seconds=start_offset,
+            model=args.model,
+            guidance_scale=args.guidance_scale,
+            filename_hint_provider="ollama",
+            filename_hint_model=args.ollama_model,
+            allow_sorted_seed_fallback=True,
+            live=False,
+        )
+    finally:
+        if previous_profile is None:
+            os.environ.pop(PROFILE_ENV_VAR, None)
+        else:
+            os.environ[PROFILE_ENV_VAR] = previous_profile
 
     plan = _read_json(paths.plan)
     report = _read_json(paths.report) if paths.report.is_file() else report
@@ -302,11 +322,20 @@ def run_interactive(args: argparse.Namespace) -> int:
 
     prompt = str(scene["prompt_text"])
     _write_text(paths.prompt, prompt)
+    policy = scene.get("choreography_policy") or {}
 
     print("\n================ PLAN READY ================")
     print(f"Prompt length: {len(prompt)} / 5000")
-    print(f"Motion profile: {scene.get('tap_motion_profile')}")
-    print(f"Tap count: {len((scene.get('tap_sync') or {}).get('primary_sync_targets_seconds') or [])}")
+    print(f"Choreography profile: {policy.get('profile_id') or scene.get('tap_motion_profile')}")
+    print(f"Profile selection: {policy.get('selection_method')}")
+    print(
+        "Tap target policy: "
+        f"{(policy.get('target_selection') or {}).get('mode', 'all_reliable')}"
+    )
+    print(
+        "Tap count: "
+        f"{len((scene.get('tap_sync') or {}).get('primary_sync_targets_seconds') or [])}"
+    )
     print(f"Prompt: {paths.prompt}")
     print("Paid submissions so far: NONE")
     _open_file(paths.prompt)
@@ -352,7 +381,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guidance-scale", type=float, default=DEFAULT_GUIDANCE_SCALE)
     parser.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL)
     parser.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
-    parser.add_argument("--dry-run", action="store_true", help="Build and validate without offering live submission.")
+    parser.add_argument(
+        "--choreography-profile",
+        default=AUTO_PROFILE,
+        help=(
+            "Per-run choreography policy. Use auto for seed-directed selection or "
+            "supply a configured profile ID for an explicit controlled run."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build and validate without offering live submission.",
+    )
     return parser
 
 
