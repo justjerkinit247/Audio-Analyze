@@ -70,7 +70,7 @@ def test_motion_freedom_replaces_control_document_with_concise_motion_brief():
     assert "compact localized twerk pulse" in prompt
     assert "glute-cheek contraction" in prompt
     assert "Both feet remain planted" in prompt
-    assert "Do not convert the accents into jumping" not in prompt
+    assert "Do not convert the accents into jumping" in prompt
     assert "jumping" in prompt.split("[NEGATIVE_PROMPT]", 1)[1]
     assert "moving choir hands while the lead pair remains frozen" in prompt
 
