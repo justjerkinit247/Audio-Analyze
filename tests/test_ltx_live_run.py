@@ -23,9 +23,19 @@ def valid_plan(*, run_id="ltx_test", filename="scene_01_solo_actor.png", multipl
                 "prompt_transport_mode": "audio_and_image_to_video",
                 "subject_count_policy": {"multiple_subjects": multiple},
                 "filename_hint_expansion": {
-                    "ltx_motion_prompt": "A solo actor moves naturally." if not multiple else "The pair moves together."
+                    "ltx_motion_prompt": (
+                        "A solo actor moves naturally."
+                        if not multiple
+                        else "The pair moves together."
+                    )
                 },
                 "tap_motion_profile": "generic_tap_action",
+                "choreography_policy": {
+                    "profile_id": "generic_tap_action",
+                    "selection_method": "default_fallback",
+                    "target_selection": {"mode": "all_reliable"},
+                    "required_prompt_phrases": [],
+                },
                 "tap_sync": {"primary_sync_targets_seconds": [0.5]},
                 "prompt_text": prompt,
             }
@@ -98,14 +108,23 @@ def test_validate_plan_rejects_solitary_language_for_multi_subject_scene():
         )
 
 
-def test_validate_plan_requires_glute_contract_when_profile_is_active():
-    plan = valid_plan(filename="scene_01_twerk_glute_cheek.png", multiple=False)
-    plan["results"][0]["tap_motion_profile"] = "localized_glute_pulse"
+def test_validate_plan_enforces_selected_profile_contract_without_hardcoding_profile():
+    plan = valid_plan(filename="scene_01_specialized_motion.png", multiple=False)
+    plan["results"][0]["choreography_policy"] = {
+        "profile_id": "configured_specialized_profile",
+        "required_prompt_phrases": ["required configured motion phrase"],
+    }
 
-    with pytest.raises(RuntimeError, match="localized glute prompt is missing"):
+    with pytest.raises(RuntimeError, match="configured_specialized_profile"):
         live._validate_plan(
             plan,
             {"status": "complete"},
             run_id="ltx_test",
-            seed_filename="scene_01_twerk_glute_cheek.png",
+            seed_filename="scene_01_specialized_motion.png",
         )
+
+
+def test_parser_defaults_to_auto_choreography_policy():
+    args = live.build_parser().parse_args([])
+
+    assert args.choreography_profile == "auto"
