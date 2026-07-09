@@ -20,8 +20,26 @@ MARKERS = [
 ]
 DEFAULT_MAX_CHARS = 5000
 DEFAULT_TARGET_CHARS = 4800
+FOREGROUND_ONSET_DEADLINE_SECONDS = 0.10
+FOREGROUND_PRIORITY_WINDOW_SECONDS = 0.50
+
+FOREGROUND_ONSET_NEGATIVE_TERMS = [
+    "frozen foreground subjects",
+    "static lead pair",
+    "delayed foreground motion",
+    "background-only motion",
+    "moving background hands while foreground remains frozen",
+    "animated background with static main characters",
+    "foreground motion starting after the first tap",
+]
 
 CRITICAL_NEGATIVE_TERMS = [
+    *FOREGROUND_ONSET_NEGATIVE_TERMS,
+    "static opening frame",
+    "frozen first frames",
+    "delayed motion onset",
+    "motionless first half",
+    "waiting before movement",
     "jumping",
     "hopping",
     "feet leaving the floor",
@@ -32,10 +50,6 @@ CRITICAL_NEGATIVE_TERMS = [
     "vertical pelvic bouncing",
     "full-body pumping",
     "large vertical displacement",
-    "static opening frame",
-    "frozen first frames",
-    "delayed motion onset",
-    "motionless first half",
     "missing dance partner",
     "missing male dancer",
     "missing female dancer",
@@ -86,7 +100,7 @@ def _split_prompt(prompt_text: str) -> tuple[str, dict[str, str]]:
 
 
 def _render_prompt(prefix: str, sections: dict[str, str]) -> str:
-    blocks = []
+    blocks: list[str] = []
     if prefix:
         blocks.append(prefix)
     for marker in MARKERS:
@@ -154,28 +168,73 @@ def _target_text(item: dict[str, Any], existing: str) -> str:
     targets = tap.get("primary_sync_targets_relative_seconds") or []
     if targets:
         return ", ".join(f"{float(value):.3f}s" for value in targets)
-    match = re.search(r"Primary tap-accent times inside this clip:\s*([^.]*)", existing or "", flags=re.I)
+    match = re.search(
+        r"Primary tap-accent times inside this clip:\s*([^.]*)",
+        existing or "",
+        flags=re.I,
+    )
     return _clean_inline(match.group(1)) if match else "no reliable tap accents detected"
+
+
+def _foreground_scope(item: dict[str, Any]) -> str:
+    policy = item.get("subject_count_policy") or {}
+    if policy.get("has_pair"):
+        return "both main foreground partners"
+    if policy.get("has_group") and not policy.get("has_choir"):
+        return "the main foreground performers"
+    return "the main foreground subject"
+
+
+def _background_priority_text(item: dict[str, Any]) -> str:
+    policy = item.get("subject_count_policy") or {}
+    if policy.get("has_choir"):
+        return (
+            "For the first 0.50 seconds, choir hands and other background motion remain subordinate and cannot be the only moving region. "
+            "After foreground motion is clearly established, the choir may add only subtle claps and sway."
+        )
+    if policy.get("has_group"):
+        return (
+            "For the first 0.50 seconds, background performers remain subordinate and cannot be the only moving region. "
+            "Background motion may increase only after the main foreground motion is clearly established."
+        )
+    return "Environmental or background motion cannot substitute for immediate motion by the main foreground subject."
 
 
 def _compact_tap_sync(item: dict[str, Any], existing: str) -> str:
     targets = _target_text(item, existing)
     profile = item.get("tap_motion_profile") or (item.get("tap_sync") or {}).get("motion_profile")
+    scope = _foreground_scope(item)
+    background_rule = _background_priority_text(item)
+
+    onset = (
+        f"FOREGROUND MOTION ONSET: {scope} begin visible motion on frame 1 and visibly depart the seed pose by 0.10 seconds. "
+        "The first listed tap is an accent target, not the start signal; do not wait for it. "
+        "Maintain continuous low-amplitude foreground motion from 0.00 through 0.50 seconds and then throughout the clip. "
+        f"{background_rule}"
+    )
+
     if profile == "localized_glute_pulse":
+        partner_rule = ""
+        if (item.get("subject_count_policy") or {}).get("has_pair"):
+            partner_rule = (
+                "By 0.10 seconds, the lead dancer's pelvis and glutes are visibly displaced from the seed pose and the partner has already begun a restrained shoulder-and-chest groove. "
+            )
         return (
             f"Primary tap-accent times inside this clip: {targets}. "
-            "Visible dance motion begins immediately at 0.00 seconds and continues throughout. "
+            f"{onset} {partner_rule}"
             "At each listed clap, snare, hi-hat, or sharp tap accent, perform one compact localized twerk pulse: a brief glute-cheek contraction, small backward pelvis pop, and controlled recoil. "
             "Alternate cheek emphasis only when physically natural. Both feet remain planted; heels stay down, knees bent, the same squat pose is maintained, and head, torso, and overall body height remain nearly constant. "
-            "Maintain subtle pelvic micro-motion between taps so the opening and spaces between accents never freeze. "
+            "Maintain visible pelvic micro-motion between taps so the foreground never freezes. "
             "Do not convert the accents into jumping, hopping, standing up, repeated squats, whole-body bouncing, vertical pumping, or feet leaving the floor. "
-            "Do not use kick-drum or bass-only hits as major movement triggers. This TAP_SYNC rule overrides any generic kick, full-beat, jumping, bouncing, full-body, or vertical direction-change wording elsewhere in the prompt."
+            "Do not use kick-drum or bass-only hits as major movement triggers. This TAP_SYNC rule overrides any generic kick, full-beat, jumping, bouncing, full-body, vertical, delayed-start, or background-only motion wording elsewhere in the prompt."
         )
+
     return (
         f"Primary tap-accent times inside this clip: {targets}. "
+        f"{onset} "
         "Use listed clap, snare, hi-hat, and sharp high-frequency accents as controlled visible action triggers. "
-        "Do not use kick-drum or bass-only hits as major movement triggers; maintain coherent motion between accents. "
-        "This TAP_SYNC rule overrides any generic kick or full-beat direction-change wording elsewhere in the prompt."
+        "Do not use kick-drum or bass-only hits as major movement triggers; maintain coherent foreground motion between accents. "
+        "This TAP_SYNC rule overrides any generic kick, full-beat, delayed-start, or background-only motion wording elsewhere in the prompt."
     )
 
 
@@ -200,10 +259,16 @@ def _compact_motion(item: dict[str, Any], existing: str, limit: int) -> str:
     return _truncate_at_boundary(source, max(240, limit))
 
 
+def _split_negative_terms(text: str) -> list[str]:
+    return [term.strip() for term in _clean_inline(text).split(",") if term.strip()]
+
+
 def _negative_terms(item: dict[str, Any], existing: str) -> list[str]:
     expansion = item.get("filename_hint_expansion") or {}
-    source = _clean_inline(expansion.get("negative_prompt") or existing)
-    raw_terms = [term.strip() for term in source.split(",") if term.strip()]
+    raw_terms = _split_negative_terms(str(expansion.get("negative_prompt") or ""))
+    raw_terms.extend(_split_negative_terms(existing))
+    raw_terms.extend(FOREGROUND_ONSET_NEGATIVE_TERMS)
+
     seen: set[str] = set()
     unique: list[str] = []
     for term in raw_terms:
@@ -221,6 +286,7 @@ def _compact_negative(item: dict[str, Any], existing: str, limit: int) -> tuple[
     by_key = {term.lower(): term for term in terms}
     prioritized: list[str] = []
     used: set[str] = set()
+
     for critical in CRITICAL_NEGATIVE_TERMS:
         key = critical.lower()
         if key in by_key and key not in used:
@@ -264,8 +330,8 @@ def compact_item_prompt(
 
     fixed_without_motion_negative = _render_prompt(prefix, sections)
     available = max(700, target_chars - len(fixed_without_motion_negative))
-    negative_limit = min(1050, max(600, int(available * 0.42)))
-    motion_limit = max(500, available - negative_limit)
+    negative_limit = min(1150, max(720, int(available * 0.46)))
+    motion_limit = max(420, available - negative_limit)
 
     sections[MOTION_MARKER] = _compact_motion(
         item,
@@ -285,13 +351,13 @@ def compact_item_prompt(
         sections[MOTION_MARKER] = _compact_motion(
             item,
             sections[MOTION_MARKER],
-            max(360, len(sections[MOTION_MARKER]) - overflow - 80),
+            max(300, len(sections[MOTION_MARKER]) - overflow - 80),
         )
         compacted = _render_prompt(prefix, sections)
 
     if len(compacted) > target_chars:
         overflow = len(compacted) - target_chars
-        negative_budget = max(360, len(sections[NEGATIVE_MARKER]) - overflow - 80)
+        negative_budget = max(600, len(sections[NEGATIVE_MARKER]) - overflow - 80)
         sections[NEGATIVE_MARKER], additionally_removed = _compact_negative(
             item,
             sections[NEGATIVE_MARKER],
@@ -305,8 +371,18 @@ def compact_item_prompt(
             f"Unable to compact final LTX prompt below {max_chars} characters; got {len(compacted)}"
         )
 
+    onset_metadata = {
+        "required": True,
+        "deadline_seconds": FOREGROUND_ONSET_DEADLINE_SECONDS,
+        "priority_window_seconds": FOREGROUND_PRIORITY_WINDOW_SECONDS,
+        "first_tap_is_start_signal": False,
+        "background_only_motion_forbidden": True,
+        "subject_scope": _foreground_scope(item),
+    }
+
     patched["prompt_text_before_budget_compaction"] = original
     patched["prompt_text"] = compacted
+    patched["foreground_motion_onset"] = onset_metadata
     patched["prompt_budget"] = {
         "status": "compacted" if len(original) > len(compacted) else "within_budget",
         "before_chars": len(original),
@@ -316,6 +392,7 @@ def compact_item_prompt(
         "removed_negative_terms": removed_terms,
         "preserved_markers": [marker for marker in MARKERS if marker in compacted],
         "policy": "compact_after_ollama_asmo_subject_lock_and_tap_sync",
+        "foreground_motion_onset_enforced": True,
     }
 
     expansion = patched.get("filename_hint_expansion")
@@ -333,9 +410,10 @@ def compact_plan_prompts(
     target_chars: int = DEFAULT_TARGET_CHARS,
 ) -> dict[str, Any]:
     patched = deepcopy(plan)
-    results = []
+    results: list[dict[str, Any]] = []
     before_lengths: list[int] = []
     after_lengths: list[int] = []
+
     for item in plan.get("results", []) or []:
         compacted = compact_item_prompt(
             item,
@@ -345,6 +423,7 @@ def compact_plan_prompts(
         before_lengths.append(int(compacted["prompt_budget"]["before_chars"]))
         after_lengths.append(int(compacted["prompt_budget"]["after_chars"]))
         results.append(compacted)
+
     patched["results"] = results
     patched["prompt_budget"] = {
         "status": "applied",
@@ -354,5 +433,6 @@ def compact_plan_prompts(
         "max_before_chars": max(before_lengths) if before_lengths else 0,
         "max_after_chars": max(after_lengths) if after_lengths else 0,
         "policy": "compact_after_all_prompt_layers",
+        "foreground_motion_onset_enforced": True,
     }
     return patched
