@@ -2,6 +2,30 @@
 
 Audio Analyze is a local-first hobby pipeline for audio analysis, prompt packaging, Runway scene generation support, LTX scene generation support, and short-form music video assembly.
 
+## One-command LTX live run
+
+On Windows, run the complete interactive LTX audio-and-image pipeline from the repository root with:
+
+```powershell
+.\run-ltx-live.cmd
+```
+
+The launcher handles the operational details inside the repository:
+
+- opens file pickers for the source audio and seed image;
+- preserves the exact seed-image filename for the Ollama prompt hint;
+- creates a unique fresh-run folder and prevents stale-plan reuse;
+- applies subject-count locking, tap sync, ASMO negative memory, and prompt-budget compaction;
+- builds and validates the plan before any paid request;
+- opens the exact final prompt for review;
+- submits one live LTX request only after the user types `LIVE`.
+
+A validation-only run is also available:
+
+```powershell
+.\run-ltx-live.cmd --dry-run
+```
+
 ## What this repo does
 
 - Analyze WAV and MP3 files for tempo, timing, and profile data
@@ -108,6 +132,7 @@ Notable modules in `src/audio_analyze/` include:
 - `beat_cut_engine.py`
 - `mid_song_reel_builder.py`
 - `ltx_filename_hint_expander.py`
+- `ltx_live_run.py`
 
 ## Project intent
 
