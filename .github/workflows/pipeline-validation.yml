@@ -63,7 +63,9 @@ jobs:
             tests/test_ltx_filename_hint_expander_ollama.py \
             tests/test_local_ai_client.py \
             tests/test_asmo_negative_prompt_memory.py \
-            tests/test_ltx_tap_accent_sync.py
+            tests/test_ltx_tap_accent_sync.py \
+            tests/test_ltx_prompt_budget.py \
+            tests/test_ltx_live_run.py
 
       - name: Create deterministic CI media fixtures
         run: |
@@ -175,6 +177,7 @@ jobs:
           )
           assert f"Seed image filename used as the Ollama prompt hint: {expected_seed}." in prompt
           assert "The seed image is authoritative for subject count and body layout." in prompt
+          assert len(prompt) <= 5000, f"Prompt exceeds hard limit: {len(prompt)}"
 
           print("Offline tap-not-boom audio-and-image pipeline validation passed")
           print(f"Selected tap times: {scene_tap.get('tap_accent_times_seconds')}")
