@@ -96,15 +96,14 @@ def build_subject_count_policy(filename: str, scene_hint: str) -> dict[str, Any]
 
     if has_pair:
         requirements.append(
-            "Keep the female lead dancer and male dance partner visible together as the foreground pair for the complete clip."
+            "Keep both visible foreground subjects together as the foreground pair for the complete clip."
         )
         negative_terms.extend(
             [
                 "solitary dancer",
                 "solo dancer",
-                "missing dance partner",
-                "missing male dancer",
-                "missing female dancer",
+                "missing foreground partner",
+                "missing visible foreground subject",
             ]
         )
 
@@ -116,7 +115,7 @@ def build_subject_count_policy(filename: str, scene_hint: str) -> dict[str, Any]
             [
                 "missing choir",
                 "removed background performers",
-                "empty cathedral background",
+                "empty performance background",
             ]
         )
     elif has_group:
@@ -133,6 +132,8 @@ def build_subject_count_policy(filename: str, scene_hint: str) -> dict[str, Any]
     return {
         "filename": filename,
         "scene_hint": scene_hint,
+        "selection_source": "exact_seed_filename_and_visible_seed_layout",
+        "role_policy": "role_neutral_visible_subject_preservation",
         "multiple_subjects": multiple_subjects,
         "has_pair": has_pair,
         "has_choir": has_choir,
@@ -177,12 +178,12 @@ def enforce_subject_count_in_expansion(
 
     if policy["multiple_subjects"]:
         replacements = (
-            (r"\ba solitary female dancer\b", "the female lead dancer and her male dance partner"),
-            (r"\ba solitary male dancer\b", "the male lead dancer and his female dance partner"),
-            (r"\ba solitary dancer\b", "the visible dance partners"),
-            (r"\bthe solitary female dancer\b", "the female lead dancer and her male dance partner"),
-            (r"\bthe solitary male dancer\b", "the male lead dancer and his female dance partner"),
-            (r"\bthe solitary dancer\b", "the visible dance partners"),
+            (r"\ba solitary female dancer\b", "the visible foreground pair"),
+            (r"\ba solitary male dancer\b", "the visible foreground pair"),
+            (r"\ba solitary dancer\b", "the visible foreground pair"),
+            (r"\bthe solitary female dancer\b", "the visible foreground pair"),
+            (r"\bthe solitary male dancer\b", "the visible foreground pair"),
+            (r"\bthe solitary dancer\b", "the visible foreground pair"),
             (r"\bsolitary\b", ""),
             (r"\bsolo\b", ""),
             (r"\blone\b", ""),
@@ -195,7 +196,7 @@ def enforce_subject_count_in_expansion(
         required_motion_sentences: list[str] = []
         if policy["has_pair"]:
             required_motion_sentences.append(
-                "The female lead dancer and male dance partner remain visible together throughout the shot; the man maintains a restrained grounded groove beside her."
+                "The visible foreground pair remains together throughout the shot; both subjects maintain coordinated grounded motion."
             )
         if policy["has_choir"]:
             required_motion_sentences.append(
@@ -221,7 +222,9 @@ def enforce_subject_count_in_expansion(
     if motion_prompt != original_motion_prompt:
         patched["ltx_motion_prompt_before_subject_count_guard"] = original_motion_prompt
         notes = list(patched.get("motion_notes") or [])
-        notes.append("subject-count guard removed false solitary/solo wording and restored filename-required subjects")
+        notes.append(
+            "subject-layout guard removed false solitary wording and restored seed-required visible subjects"
+        )
         patched["motion_notes"] = notes
 
     return patched, policy
@@ -234,7 +237,15 @@ def build_audio_timing_metadata(item: dict[str, Any], plan: dict[str, Any]) -> d
     end = _as_float(scene.get("end"))
     duration = _as_float(scene.get("duration"))
     tempo = analysis.get("tempo_bpm") or analysis.get("tempo_bpm_from_full_track")
-    beat_alignment_enabled = bool(item.get("beat_alignment_enabled", plan.get("beat_alignment_enabled", analysis.get("beat_alignment_enabled", False))))
+    beat_alignment_enabled = bool(
+        item.get(
+            "beat_alignment_enabled",
+            plan.get(
+                "beat_alignment_enabled",
+                analysis.get("beat_alignment_enabled", False),
+            ),
+        )
+    )
 
     estimated_beats_in_scene = None
     tempo_float = _as_float(tempo)
@@ -271,7 +282,11 @@ def render_audio_timing_block(audio_timing: dict[str, Any]) -> str:
     duration = _format_seconds(audio_timing.get("duration_seconds"))
     tempo = _format_bpm(audio_timing.get("tempo_bpm"))
     estimated_beats = audio_timing.get("estimated_beats_in_scene")
-    beat_text = f"approximately {estimated_beats} beats in this clip" if estimated_beats is not None else "beat count unavailable for this clip"
+    beat_text = (
+        f"approximately {estimated_beats} beats in this clip"
+        if estimated_beats is not None
+        else "beat count unavailable for this clip"
+    )
     beat_alignment = "enabled" if audio_timing.get("beat_alignment_enabled") else "not enabled"
     scene_type = audio_timing.get("scene_type") or "planned phrase"
     sync_policy = audio_timing.get("sync_policy") or "Use the planned scene timestamp window."
@@ -290,7 +305,7 @@ def render_audio_timing_block(audio_timing: dict[str, Any]) -> str:
         f"Tempo target: {tempo}; {beat_text}. Beat alignment: {beat_alignment}. "
         f"Scene type: {scene_type}. Sync policy: {sync_policy} "
         f"Start rule: {sync_start_rule}; end rule: {sync_end_rule}. "
-        f"Motion timing cue: keep visible motion, camera drift, environmental movement, and any major action changes locked to this timestamp window and the detected rhythmic feel. "
+        "Motion timing cue: keep visible motion, camera drift, environmental movement, and any major action changes locked to this timestamp window and the detected rhythmic feel. "
         f"Energy/pacing cue: {energy}, {pacing}. Movement cue: {movement}. Camera cue: {camera}. Lighting cue: {lighting}. Mix cue: {mix}.\n"
     )
 
@@ -321,7 +336,11 @@ def build_scene_prompt_from_expansion(
 
 
 def _seed_filename(item: dict[str, Any]) -> str:
-    seed_path = item.get("seed_image_used") or (item.get("seed_assignment") or {}).get("seed_image_path") or "seed_image.png"
+    seed_path = (
+        item.get("seed_image_used")
+        or (item.get("seed_assignment") or {}).get("seed_image_path")
+        or "seed_image.png"
+    )
     return Path(str(seed_path)).name
 
 
@@ -341,7 +360,9 @@ def expand_plan_data(
         filename = _seed_filename(item)
         scene_hint = clean_scene_hint(filename)
         if not scene_hint:
-            raise ValueError(f"Seed image filename produced an empty Ollama prompt hint: {filename}")
+            raise ValueError(
+                f"Seed image filename produced an empty Ollama prompt hint: {filename}"
+            )
 
         raw_expansion = expander(
             scene_hint,
@@ -370,7 +391,9 @@ def expand_plan_data(
             audio_timing=audio_timing,
             subject_policy=subject_policy,
         )
-        item["prompt_build_method"] = "seed_filename_ollama_expansion_with_audio_timing_and_subject_lock"
+        item["prompt_build_method"] = (
+            "seed_filename_ollama_expansion_with_audio_timing_and_subject_lock"
+        )
         item["prompt_transport_mode"] = "audio_and_image_to_video"
         item["prompt_expansion_provider"] = provider
         if model:
@@ -389,7 +412,9 @@ def expand_plan_data(
         "seed_filename_source": "exact_seed_image_basename",
         "transport_mode": "audio_and_image_to_video",
     }
-    patched["prompt_build_method"] = "seed_filename_ollama_expansion_with_audio_timing_and_subject_lock"
+    patched["prompt_build_method"] = (
+        "seed_filename_ollama_expansion_with_audio_timing_and_subject_lock"
+    )
     patched["prompt_transport_mode"] = "audio_and_image_to_video"
     return patched
 
@@ -409,10 +434,16 @@ def expand_plan_file(
 def main() -> None:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Apply filename-hint prompt expansion to an existing LTX plan JSON.")
+    parser = argparse.ArgumentParser(
+        description="Apply filename-hint prompt expansion to an existing LTX plan JSON."
+    )
     parser.add_argument("--plan-json", required=True)
     parser.add_argument("--output", default=None)
-    parser.add_argument("--provider", default=DEFAULT_PLAN_EXPANSION_PROVIDER, choices=["template", "openai", "ollama"])
+    parser.add_argument(
+        "--provider",
+        default=DEFAULT_PLAN_EXPANSION_PROVIDER,
+        choices=["template", "openai", "ollama"],
+    )
     parser.add_argument("--model", default=DEFAULT_OLLAMA_MODEL)
     args = parser.parse_args()
 
