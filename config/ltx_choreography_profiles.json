@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "default_profile": "generic_tap_action",
+  "profiles": {
+    "generic_tap_action": {
+      "description": "Universal tap-reactive motion profile for scenes without a more specific structured policy.",
+      "priority": 0,
+      "activation": {
+        "mode": "default"
+      },
+      "target_selection": {
+        "mode": "all_reliable"
+      },
+      "prompt_template": "[TAP_SYNC]\nPrimary tap-accent times inside this clip: {target_text}. Use sharp clap, snare, hi-hat, and similar high-frequency tap transients as visible motion triggers. Land controlled visible action changes on each listed primary tap accent. Do not trigger direction changes from kick-drum or bass-only boom hits; hold, travel, or prepare between tap accents. This TAP_SYNC rule overrides any generic kick or full-beat direction-change wording elsewhere in the prompt.\n",
+      "negative_terms": [],
+      "required_prompt_phrases": [
+        "Use sharp clap, snare, hi-hat",
+        "Land controlled visible action changes",
+        "bass-only boom hits"
+      ],
+      "manifest": {
+        "beat_sync_rule": "Visible action accents land on sharp clap/snare/hi-hat-like tap accents, including off-grid accents; kick/bass-only boom hits do not trigger major direction changes.",
+        "dance_direction_change_rule": "Land controlled visible action changes on every listed primary tap accent.",
+        "negative_motion_rules": [
+          "no kick-drum or bass-only direction changes",
+          "no drifting through a listed tap accent without a visible response",
+          "no random shaking between tap accents",
+          "no chaotic camera spin",
+          "no warped anatomy",
+          "no random background or body layout mutation"
+        ]
+      }
+    },
+    "localized_glute_pulse": {
+      "description": "Localized lower-body pulse translation selected from explicit per-run direction or matching seed-direction evidence.",
+      "priority": 100,
+      "activation": {
+        "mode": "any_token_or_all_groups",
+        "any_tokens": [
+          "twerk",
+          "twerking",
+          "glute",
+          "glutes",
+          "cheek",
+          "cheeks",
+          "booty",
+          "rump"
+        ],
+        "all_token_groups": [
+          ["hip", "hips", "pelvis", "pelvic"],
+          ["squat", "squatting", "lower", "body"]
+        ]
+      },
+      "target_selection": {
+        "mode": "all_reliable"
+      },
+      "prompt_template": "[TAP_SYNC]\nPrimary tap-accent times inside this clip: {target_text}. Visible dance motion begins immediately at 0.00 seconds and continues throughout the entire clip; never hold the seed image as a static opening. At every listed clap, snare, hi-hat, or sharp tap accent, perform one compact localized twerk pulse: a brief glute-cheek contraction, a small backward pelvis pop, and a controlled recoil. Alternate left and right glute-cheek emphasis only when physically natural, while keeping the motion isolated below the waist. Both feet remain planted, heels remain down, knees stay bent, and the dancer remains in the same squat pose family. Keep head, shoulders, chest, torso, and overall body height nearly constant; the accent comes from the glutes and pelvis, not from moving the whole body upward. Between listed accents, maintain subtle continuous pelvic micro-motion and a small controlled hip sway so the image never freezes while waiting for the next tap. Do not convert the accents into jumping, hopping, standing up, repeated squats, whole-body bouncing, vertical pumping, or feet leaving the floor. Do not use kick-drum or bass-only boom hits as major movement triggers. This TAP_SYNC instruction overrides generic jumping, bouncing, kick-driven, full-body, or vertical direction-change wording elsewhere in the prompt.\n",
+      "negative_terms": [
+        "static opening frame",
+        "frozen first frames",
+        "delayed motion onset",
+        "motionless first half",
+        "waiting before movement",
+        "jumping",
+        "hopping",
+        "feet leaving the floor",
+        "heels lifting",
+        "standing up",
+        "repeated squats",
+        "whole-body bouncing",
+        "vertical pelvic bouncing",
+        "full-body pumping",
+        "large vertical displacement"
+      ],
+      "required_prompt_phrases": [
+        "compact localized twerk pulse",
+        "glute-cheek contraction",
+        "Both feet remain planted",
+        "Do not convert the accents into jumping"
+      ],
+      "manifest": {
+        "beat_sync_rule": "Visible action accents land on sharp clap/snare/hi-hat-like tap accents, including off-grid accents; kick/bass-only boom hits do not trigger major direction changes.",
+        "dance_direction_change_rule": "Each listed tap triggers a compact isolated glute-cheek contraction, small backward pelvis pop, and controlled recoil while feet stay planted and overall body height remains stable.",
+        "negative_motion_rules": [
+          "no jumping or hopping",
+          "no feet leaving the floor or heels lifting",
+          "no standing up or repeated squats",
+          "no whole-body bouncing or vertical pumping",
+          "no frozen opening or delayed motion onset",
+          "no kick-drum or bass-only major movement triggers",
+          "no warped anatomy",
+          "no random background or body layout mutation"
+        ]
+      }
+    }
+  }
+}
