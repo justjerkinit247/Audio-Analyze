@@ -187,14 +187,15 @@ def test_duet_and_choir_filename_removes_false_solitary_language():
     assert policy["multiple_subjects"] is True
     assert policy["has_pair"] is True
     assert policy["has_choir"] is True
+    assert policy["role_policy"] == "role_neutral_visible_subject_preservation"
     assert "solitary" not in motion.lower()
     assert "performs alone" not in motion.lower()
-    assert "female lead dancer and male dance partner remain visible together" in motion
+    assert "visible foreground pair remains together" in motion
     assert "choir remains visible in the background" in motion
-    assert "Keep the female lead dancer and male dance partner visible together" in prompt
+    assert "Keep both visible foreground subjects together" in prompt
     assert "Keep the existing choir visible in the background" in prompt
     assert "Never describe or render this scene as solitary" in prompt
     negative = item["filename_hint_expansion"]["negative_prompt"]
-    assert "missing dance partner" in negative
+    assert "missing foreground partner" in negative
     assert "missing choir" in negative
     assert "changed subject count" in negative
