@@ -11,9 +11,21 @@ import numpy as np
 try:
     from .path_policy import resolve_runtime_path, serialize_path
     from .ltx_prompt_budget import compact_plan_prompts
+    from .ltx_choreography_profiles import (
+        AUTO_PROFILE,
+        render_tap_sync_prompt,
+        resolve_choreography_profile,
+        target_limit_for_policy,
+    )
 except ImportError:
     from path_policy import resolve_runtime_path, serialize_path
     from ltx_prompt_budget import compact_plan_prompts
+    from ltx_choreography_profiles import (
+        AUTO_PROFILE,
+        render_tap_sync_prompt,
+        resolve_choreography_profile,
+        target_limit_for_policy,
+    )
 
 
 TAP_SYNC_MARKER = "[TAP_SYNC]"
@@ -22,35 +34,6 @@ NEGATIVE_MARKER = "[NEGATIVE_PROMPT]"
 DEFAULT_HIGH_BAND_HZ = 1200.0
 DEFAULT_MIN_HIGH_RATIO = 0.22
 DEFAULT_MIN_SPACING_SECONDS = 0.08
-
-LOCALIZED_GLUTE_TOKENS = {
-    "twerk",
-    "twerking",
-    "glute",
-    "glutes",
-    "cheek",
-    "cheeks",
-    "booty",
-    "rump",
-}
-
-LOCALIZED_GLUTE_NEGATIVE_TERMS = [
-    "static opening frame",
-    "frozen first frames",
-    "delayed motion onset",
-    "motionless first half",
-    "waiting before movement",
-    "jumping",
-    "hopping",
-    "feet leaving the floor",
-    "heels lifting",
-    "standing up",
-    "repeated squats",
-    "whole-body bouncing",
-    "vertical pelvic bouncing",
-    "full-body pumping",
-    "large vertical displacement",
-]
 
 
 def _scalar(value: Any) -> float:
@@ -73,12 +56,12 @@ def _scene_hint_for_item(item: dict[str, Any]) -> str:
 
 
 def is_localized_glute_scene(scene_hint: str) -> bool:
-    tokens = set(re.findall(r"[a-z0-9]+", str(scene_hint or "").lower()))
-    if tokens & LOCALIZED_GLUTE_TOKENS:
-        return True
-    has_hip_or_pelvis = bool(tokens & {"hip", "hips", "pelvis", "pelvic"})
-    has_squat_or_lower_body = bool(tokens & {"squat", "squatting", "lower", "body"})
-    return has_hip_or_pelvis and has_squat_or_lower_body
+    """Backward-compatible helper backed by the structured policy resolver."""
+    policy = resolve_choreography_profile(
+        {"seed_filename_prompt_hint": scene_hint},
+        requested_profile=AUTO_PROFILE,
+    )
+    return policy.get("profile_id") == "localized_glute_pulse"
 
 
 def merge_negative_prompt_terms(prompt_text: str, extra_terms: list[str]) -> str:
@@ -113,9 +96,8 @@ def select_tap_accent_targets(
     """Select reliable sharp tap accents and return them in time order.
 
     When limit is None, every candidate surviving the analysis thresholds and
-    minimum-spacing rule is retained. A numeric limit remains available for
-    callers that explicitly request one, but the standard orchestrator does
-    not impose an arbitrary scene-level floor or ceiling.
+    minimum-spacing rule is retained. A numeric limit is used only when an
+    explicitly selected choreography policy requests one.
     """
     active_limit = None if limit is None else max(0, int(limit))
     if active_limit == 0:
@@ -181,7 +163,12 @@ def _high_frequency_ratio(y_percussive: np.ndarray, sr: int) -> np.ndarray:
     return np.divide(high, total + 1e-12)
 
 
-def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> dict[str, Any]:
+def extract_tap_beat_markers(
+    audio_path: str | Path,
+    plan: dict[str, Any],
+    *,
+    choreography_profile: str = AUTO_PROFILE,
+) -> dict[str, Any]:
     audio_path = resolve_runtime_path(audio_path)
     y, sr = librosa.load(str(audio_path), sr=None, mono=True)
     duration = float(librosa.get_duration(y=y, sr=sr))
@@ -244,12 +231,26 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
         )
 
     scenes: list[dict[str, Any]] = []
+    profile_counts: dict[str, int] = {}
     for item in plan.get("results", []):
         clip_index = int(item.get("clip_index", 0))
         scene = item.get("scene") or {}
         start = float(scene.get("start", 0.0))
         end = float(scene.get("end", start))
         scene_duration = max(0.0, end - start)
+        requested = (
+            item.get("choreography_profile_requested")
+            or plan.get("choreography_profile_requested")
+            or choreography_profile
+        )
+        policy = resolve_choreography_profile(
+            item,
+            requested_profile=str(requested or AUTO_PROFILE),
+        )
+        profile_id = str(policy["profile_id"])
+        profile_counts[profile_id] = profile_counts.get(profile_id, 0) + 1
+        limit = target_limit_for_policy(policy)
+
         scene_taps = [
             row for row in tap_candidates if start <= float(row["time"]) <= end
         ]
@@ -259,11 +260,12 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
         targets, source = choose_primary_sync_targets(
             scene_taps,
             scene_beats,
-            limit=None,
+            limit=limit,
         )
         selected_rows = [
             row for row in scene_taps if round(float(row["time"]), 3) in set(targets)
         ]
+        selection_mode = str((policy.get("target_selection") or {}).get("mode") or "all_reliable")
         scenes.append(
             {
                 "clip_index": clip_index,
@@ -276,9 +278,8 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
                 ],
                 "primary_sync_source": source,
                 "sync_target_policy": "tap_not_boom",
-                "sync_target_count_policy": (
-                    "all_reliable_audio_derived_events_in_scene_window"
-                ),
+                "sync_target_count_policy": selection_mode,
+                "choreography_policy": policy,
                 "tap_accent_times_seconds": [
                     round(float(row["time"]), 3) for row in selected_rows
                 ],
@@ -299,7 +300,8 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
         "duration_seconds": round(duration, 3),
         "tempo_bpm": round(tempo, 3) if tempo else None,
         "tap_sync_policy": "tap_not_boom",
-        "tap_target_count_policy": "all_reliable_audio_derived_events",
+        "choreography_profile_requested": choreography_profile,
+        "choreography_profile_counts": profile_counts,
         "tap_accent_candidate_count": len(tap_candidates),
         "tap_accent_candidates": tap_candidates,
         "beat_grid": beat_grid,
@@ -311,35 +313,20 @@ def build_tap_sync_prompt_block(
     scene_marker: dict[str, Any],
     *,
     scene_hint: str = "",
+    choreography_profile: str = AUTO_PROFILE,
 ) -> str:
     targets = scene_marker.get("primary_sync_targets_relative_seconds") or []
     target_text = ", ".join(f"{float(value):.3f}s" for value in targets)
     if not target_text:
         target_text = "no reliable tap accents detected"
 
-    if is_localized_glute_scene(scene_hint):
-        return (
-            f"{TAP_SYNC_MARKER}\n"
-            f"Primary tap-accent times inside this clip: {target_text}. "
-            "Visible dance motion begins immediately at 0.00 seconds and continues throughout the entire clip; never hold the seed image as a static opening. "
-            "At every listed clap, snare, hi-hat, or sharp tap accent, perform one compact localized twerk pulse: a brief glute-cheek contraction, a small backward pelvis pop, and a controlled recoil. "
-            "Alternate left and right glute-cheek emphasis only when physically natural, while keeping the motion isolated below the waist. "
-            "Both feet remain planted, heels remain down, knees stay bent, and the dancer remains in the same squat pose family. "
-            "Keep head, shoulders, chest, torso, and overall body height nearly constant; the accent comes from the glutes and pelvis, not from moving the whole body upward. "
-            "Between listed accents, maintain subtle continuous pelvic micro-motion and a small controlled hip sway so the image never freezes while waiting for the next tap. "
-            "Do not convert the accents into jumping, hopping, standing up, repeated squats, whole-body bouncing, vertical pumping, or feet leaving the floor. "
-            "Do not use kick-drum or bass-only boom hits as major movement triggers. "
-            "This TAP_SYNC instruction overrides generic jumping, bouncing, kick-driven, full-body, or vertical direction-change wording elsewhere in the prompt.\n"
+    policy = scene_marker.get("choreography_policy")
+    if not policy:
+        policy = resolve_choreography_profile(
+            {"seed_filename_prompt_hint": scene_hint},
+            requested_profile=choreography_profile,
         )
-
-    return (
-        f"{TAP_SYNC_MARKER}\n"
-        f"Primary tap-accent times inside this clip: {target_text}. "
-        "Use sharp clap, snare, hi-hat, and similar high-frequency tap transients as visible motion triggers. "
-        "Land controlled visible action changes on each listed primary tap accent. "
-        "Do not trigger direction changes from kick-drum or bass-only boom hits; hold, travel, or prepare between tap accents. "
-        "This TAP_SYNC rule overrides any generic kick or full-beat direction-change wording elsewhere in the prompt.\n"
-    )
+    return render_tap_sync_prompt(policy, target_text)
 
 
 def insert_tap_sync_prompt(prompt_text: str, tap_sync_block: str) -> str:
@@ -364,8 +351,13 @@ def apply_tap_sync_to_plan_data(
     *,
     audio_path: str | Path,
     markers: dict[str, Any] | None = None,
+    choreography_profile: str = AUTO_PROFILE,
 ) -> dict[str, Any]:
-    markers = markers or extract_tap_beat_markers(audio_path, plan)
+    markers = markers or extract_tap_beat_markers(
+        audio_path,
+        plan,
+        choreography_profile=choreography_profile,
+    )
     by_clip = {
         int(item.get("clip_index")): item
         for item in markers.get("scenes", [])
@@ -373,33 +365,54 @@ def apply_tap_sync_to_plan_data(
     }
     patched = deepcopy(plan)
     results: list[dict[str, Any]] = []
-    profile_counts = {"localized_glute_pulse": 0, "generic_tap_action": 0}
+    profile_counts: dict[str, int] = {}
 
     for raw_item in plan.get("results", []):
         item = deepcopy(raw_item)
         scene_marker = deepcopy(by_clip.get(int(item.get("clip_index", 0)), {}))
         scene_hint = _scene_hint_for_item(item)
-        localized_glute = is_localized_glute_scene(scene_hint)
-        motion_profile = "localized_glute_pulse" if localized_glute else "generic_tap_action"
-        profile_counts[motion_profile] += 1
-        scene_marker["motion_profile"] = motion_profile
+        requested = (
+            item.get("choreography_profile_requested")
+            or plan.get("choreography_profile_requested")
+            or choreography_profile
+        )
+        policy = scene_marker.get("choreography_policy") or resolve_choreography_profile(
+            item,
+            requested_profile=str(requested or AUTO_PROFILE),
+        )
+        profile_id = str(policy["profile_id"])
+        profile_counts[profile_id] = profile_counts.get(profile_id, 0) + 1
+        scene_marker["choreography_policy"] = policy
+        scene_marker["motion_profile"] = profile_id
         scene_marker["scene_hint"] = scene_hint
 
-        block = build_tap_sync_prompt_block(scene_marker, scene_hint=scene_hint)
+        block = build_tap_sync_prompt_block(
+            scene_marker,
+            scene_hint=scene_hint,
+            choreography_profile=str(requested or AUTO_PROFILE),
+        )
         prompt_text = insert_tap_sync_prompt(item.get("prompt_text", ""), block)
-        if localized_glute:
-            prompt_text = merge_negative_prompt_terms(
-                prompt_text,
-                LOCALIZED_GLUTE_NEGATIVE_TERMS,
-            )
+        prompt_text = merge_negative_prompt_terms(
+            prompt_text,
+            list(policy.get("negative_terms") or []),
+        )
 
         item["tap_sync"] = scene_marker
         item["tap_sync_prompt_block"] = block
-        item["tap_motion_profile"] = motion_profile
+        item["choreography_profile_requested"] = str(requested or AUTO_PROFILE)
+        item["choreography_policy"] = policy
+        item["tap_motion_profile"] = profile_id
         item["prompt_text"] = prompt_text
         results.append(item)
 
     patched["results"] = results
+    patched["choreography_profile_requested"] = choreography_profile
+    patched["choreography_policy"] = {
+        "status": "applied",
+        "selection_scope": "per_scene",
+        "requested_profile": choreography_profile,
+        "profile_counts": profile_counts,
+    }
     patched["tap_sync"] = {
         "status": "applied",
         "policy": "tap_not_boom",
@@ -424,40 +437,25 @@ def wrap_choreography_manifest(
         for scene in manifest.get("scenes", []):
             clip_index = int(scene.get("clip_index", 0))
             plan_item = plan_items.get(clip_index, {})
-            motion_profile = plan_item.get("tap_motion_profile") or "generic_tap_action"
-            scene["motion_profile"] = motion_profile
-            scene["beat_sync_rule"] = (
-                "Visible action accents land on sharp clap/snare/hi-hat-like tap accents, "
-                "including off-grid accents; kick/bass-only boom hits do not trigger major direction changes."
+            policy = plan_item.get("choreography_policy") or resolve_choreography_profile(
+                plan_item,
+                requested_profile=plan_item.get("choreography_profile_requested") or AUTO_PROFILE,
             )
-            if motion_profile == "localized_glute_pulse":
-                scene["dance_direction_change_rule"] = (
-                    "Each listed tap triggers a compact isolated glute-cheek contraction, "
-                    "small backward pelvis pop, and controlled recoil while feet stay planted "
-                    "and overall body height remains stable."
-                )
-                scene["negative_motion_rules"] = [
-                    "no jumping or hopping",
-                    "no feet leaving the floor or heels lifting",
-                    "no standing up or repeated squats",
-                    "no whole-body bouncing or vertical pumping",
-                    "no frozen opening or delayed motion onset",
-                    "no kick-drum or bass-only major movement triggers",
-                    "no warped anatomy",
-                    "no random background or body layout mutation",
-                ]
-            else:
-                scene["dance_direction_change_rule"] = (
-                    "Land controlled visible action changes on every listed primary tap accent."
-                )
-                scene["negative_motion_rules"] = [
-                    "no kick-drum or bass-only direction changes",
-                    "no drifting through a listed tap accent without a visible response",
-                    "no random shaking between tap accents",
-                    "no chaotic camera spin",
-                    "no warped anatomy",
-                    "no random background or body layout mutation",
-                ]
+            profile_id = str(policy.get("profile_id") or "generic_tap_action")
+            policy_manifest = policy.get("manifest") or {}
+            scene["motion_profile"] = profile_id
+            scene["choreography_policy"] = {
+                "profile_id": profile_id,
+                "selection_method": policy.get("selection_method"),
+                "target_selection": policy.get("target_selection"),
+            }
+            scene["beat_sync_rule"] = policy_manifest.get("beat_sync_rule")
+            scene["dance_direction_change_rule"] = policy_manifest.get(
+                "dance_direction_change_rule"
+            )
+            scene["negative_motion_rules"] = list(
+                policy_manifest.get("negative_motion_rules") or []
+            )
         return manifest
 
     return wrapped
