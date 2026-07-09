@@ -5,10 +5,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 import json
+import os
 import re
 
 
 AUTO_PROFILE = "auto"
+PROFILE_ENV_VAR = "LTX_CHOREOGRAPHY_PROFILE"
 DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[2] / "config" / "ltx_choreography_profiles.json"
 )
@@ -86,6 +88,10 @@ def normalize_requested_profile(
     config_path: str | Path | None = None,
 ) -> str:
     value = str(requested or AUTO_PROFILE).strip().lower() or AUTO_PROFILE
+    environment_override = os.environ.get(PROFILE_ENV_VAR, "").strip().lower()
+    if value == AUTO_PROFILE and environment_override:
+        value = environment_override
+
     valid = set(available_profile_ids(config_path)) | {AUTO_PROFILE}
     if value not in valid:
         raise ValueError(
