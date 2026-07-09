@@ -10,5 +10,5 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 set "PYTHONPATH=%CD%\src"
-".venv\Scripts\python.exe" -m audio_analyze.ltx_live_run %*
+".venv\Scripts\python.exe" -m audio_analyze.ltx_live_cli %*
 exit /b %ERRORLEVEL%
