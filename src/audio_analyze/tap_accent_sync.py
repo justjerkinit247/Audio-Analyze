@@ -107,10 +107,20 @@ def merge_negative_prompt_terms(prompt_text: str, extra_terms: list[str]) -> str
 def select_tap_accent_targets(
     candidates: list[dict[str, Any]],
     *,
-    limit: int,
+    limit: int | None = None,
     min_spacing_seconds: float = DEFAULT_MIN_SPACING_SECONDS,
 ) -> list[dict[str, Any]]:
-    """Select the strongest sharp tap accents, then return them in time order."""
+    """Select reliable sharp tap accents and return them in time order.
+
+    When limit is None, every candidate surviving the analysis thresholds and
+    minimum-spacing rule is retained. A numeric limit remains available for
+    callers that explicitly request one, but the standard orchestrator does
+    not impose an arbitrary scene-level floor or ceiling.
+    """
+    active_limit = None if limit is None else max(0, int(limit))
+    if active_limit == 0:
+        return []
+
     ranked = sorted(
         candidates,
         key=lambda item: (
@@ -123,10 +133,13 @@ def select_tap_accent_targets(
     selected: list[dict[str, Any]] = []
     for candidate in ranked:
         time_value = float(candidate["time"])
-        if any(abs(time_value - float(existing["time"])) < min_spacing_seconds for existing in selected):
+        if any(
+            abs(time_value - float(existing["time"])) < min_spacing_seconds
+            for existing in selected
+        ):
             continue
         selected.append(candidate)
-        if len(selected) >= max(1, int(limit)):
+        if active_limit is not None and len(selected) >= active_limit:
             break
     return sorted(selected, key=lambda item: float(item["time"]))
 
@@ -135,18 +148,23 @@ def choose_primary_sync_targets(
     tap_candidates: list[dict[str, Any]],
     beat_grid_items: list[dict[str, Any]],
     *,
-    limit: int,
+    limit: int | None = None,
 ) -> tuple[list[float], str]:
-    """Prefer actual sharp tap transients; use percussive beat-grid hits only as fallback."""
+    """Prefer actual sharp tap transients; use beat-grid hits only as fallback."""
     selected_taps = select_tap_accent_targets(tap_candidates, limit=limit)
     if selected_taps:
-        return [round(float(item["time"]), 3) for item in selected_taps], "high_frequency_percussive_onsets"
+        return (
+            [round(float(item["time"]), 3) for item in selected_taps],
+            "high_frequency_percussive_onsets",
+        )
 
     ranked_beats = sorted(
         beat_grid_items,
         key=lambda item: float(item.get("percussive_strength", 0.0)),
         reverse=True,
-    )[:limit]
+    )
+    if limit is not None:
+        ranked_beats = ranked_beats[: max(0, int(limit))]
     return (
         sorted(round(float(item["time"]), 3) for item in ranked_beats),
         "beat_grid_percussive_fallback",
@@ -217,7 +235,9 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
             {
                 "time": round(float(beat_time), 3),
                 "percussive_strength": round(
-                    float(percussive_env[index]) if 0 <= index < len(percussive_env) else 0.0,
+                    float(percussive_env[index])
+                    if 0 <= index < len(percussive_env)
+                    else 0.0,
                     6,
                 ),
             }
@@ -230,12 +250,19 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
         start = float(scene.get("start", 0.0))
         end = float(scene.get("end", start))
         scene_duration = max(0.0, end - start)
-        limit = max(8, min(24, int(round(scene_duration * 4.0))))
-        scene_taps = [item for item in tap_candidates if start <= float(item["time"]) <= end]
-        scene_beats = [item for item in beat_grid if start <= float(item["time"]) <= end]
-        targets, source = choose_primary_sync_targets(scene_taps, scene_beats, limit=limit)
+        scene_taps = [
+            row for row in tap_candidates if start <= float(row["time"]) <= end
+        ]
+        scene_beats = [
+            row for row in beat_grid if start <= float(row["time"]) <= end
+        ]
+        targets, source = choose_primary_sync_targets(
+            scene_taps,
+            scene_beats,
+            limit=None,
+        )
         selected_rows = [
-            item for item in scene_taps if round(float(item["time"]), 3) in set(targets)
+            row for row in scene_taps if round(float(row["time"]), 3) in set(targets)
         ]
         scenes.append(
             {
@@ -249,14 +276,17 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
                 ],
                 "primary_sync_source": source,
                 "sync_target_policy": "tap_not_boom",
+                "sync_target_count_policy": (
+                    "all_reliable_audio_derived_events_in_scene_window"
+                ),
                 "tap_accent_times_seconds": [
-                    round(float(item["time"]), 3) for item in selected_rows
+                    round(float(row["time"]), 3) for row in selected_rows
                 ],
                 "tap_accent_strengths": [
-                    float(item["strength"]) for item in selected_rows
+                    float(row["strength"]) for row in selected_rows
                 ],
                 "tap_accent_high_frequency_ratios": [
-                    float(item["high_frequency_ratio"]) for item in selected_rows
+                    float(row["high_frequency_ratio"]) for row in selected_rows
                 ],
                 "sync_density": len(targets),
             }
@@ -269,6 +299,7 @@ def extract_tap_beat_markers(audio_path: str | Path, plan: dict[str, Any]) -> di
         "duration_seconds": round(duration, 3),
         "tempo_bpm": round(tempo, 3) if tempo else None,
         "tap_sync_policy": "tap_not_boom",
+        "tap_target_count_policy": "all_reliable_audio_derived_events",
         "tap_accent_candidate_count": len(tap_candidates),
         "tap_accent_candidates": tap_candidates,
         "beat_grid": beat_grid,

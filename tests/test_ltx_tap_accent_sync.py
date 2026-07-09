@@ -10,6 +10,18 @@ from audio_analyze.tap_accent_sync import (
 )
 
 
+def _generic_tap_candidates(count: int) -> list[dict]:
+    return [
+        {
+            "time": round(index * 0.1, 3),
+            "strength": 1.0,
+            "high_frequency_ratio": 0.8,
+            "tap_score": 0.8,
+        }
+        for index in range(count)
+    ]
+
+
 def test_select_tap_accent_targets_keeps_off_grid_high_scores_in_time_order():
     candidates = [
         {"time": 1.00, "strength": 0.9, "high_frequency_ratio": 0.30, "tap_score": 0.27},
@@ -20,6 +32,42 @@ def test_select_tap_accent_targets_keeps_off_grid_high_scores_in_time_order():
     selected = select_tap_accent_targets(candidates, limit=2)
 
     assert [row["time"] for row in selected] == [1.25, 1.50]
+
+
+def test_analysis_derived_selection_has_no_fixed_floor_or_ceiling():
+    for count in (6, 24, 55):
+        candidates = _generic_tap_candidates(count)
+
+        selected = select_tap_accent_targets(candidates)
+        targets, source = choose_primary_sync_targets(candidates, [])
+
+        assert len(selected) == count
+        assert len(targets) == count
+        assert source == "high_frequency_percussive_onsets"
+        assert targets[0] == candidates[0]["time"]
+        assert targets[-1] == candidates[-1]["time"]
+
+
+def test_explicit_limit_remains_available_without_becoming_the_default():
+    candidates = _generic_tap_candidates(55)
+
+    selected = select_tap_accent_targets(candidates, limit=7)
+
+    assert len(selected) == 7
+
+
+def test_audio_derived_prompt_can_carry_fifty_five_targets():
+    targets = [round(index * 0.1, 3) for index in range(55)]
+
+    block = build_tap_sync_prompt_block(
+        {"primary_sync_targets_relative_seconds": targets},
+        scene_hint="generic performer choreography",
+    )
+
+    assert "0.000s" in block
+    assert "5.400s" in block
+    assert block.count("s") >= 55
+    assert len(block) < 5000
 
 
 def test_primary_targets_prefer_taps_over_stronger_beat_grid_fallback():
