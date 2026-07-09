@@ -84,6 +84,7 @@ def build_motion_freedom_prompt(item: dict[str, Any]) -> str:
             f"{partner_motion}"
             f"On the major tap accents at {target_text}, she adds one compact localized twerk pulse—a brief glute-cheek contraction, small backward pelvis pop, and controlled recoil—while continuing to move naturally between accents instead of waiting for the first one. "
             "Both feet remain planted, heels down, knees bent, and the low squat remains grounded, while natural breathing and small torso response keep the performance alive rather than rigid. "
+            "Do not convert the accents into jumping, standing up, repeated squats, or whole-body bouncing. "
             f"{background_rule} "
             "The camera is nearly locked with only a slow subtle push-in."
         )
