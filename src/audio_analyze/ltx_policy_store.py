@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import argparse
 import json
+import math
 
 
 DEFAULT_POLICY = {
@@ -26,6 +27,12 @@ DEFAULT_POLICY = {
         "downbeat_lock_boost": 0.0,
         "prompt_compression_bias": 0.0,
     },
+}
+
+TRUSTED_SCORE_SOURCES = {
+    "human_scorecard",
+    "human_score",
+    "explicit_human_score",
 }
 
 
@@ -71,19 +78,64 @@ def update_weight(policy: dict, strategy: str, score: float) -> None:
         item["weight"] = round(clamp(float(item.get("weight", 1.0)) * (1.0 - 0.18 * (1.0 - score)), 0.1, 5.0), 4)
 
 
+def _valid_numeric_score(value) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    score = float(value)
+    if not math.isfinite(score) or score < 0.0 or score > 1.0:
+        return None
+    return score
+
+
 def average(values):
-    vals = [v for v in values if isinstance(v, (int, float))]
+    vals = [score for value in values if (score := _valid_numeric_score(value)) is not None]
     return sum(vals) / len(vals) if vals else None
+
+
+def _score_source(scene: dict, metric: str) -> str | None:
+    evidence = scene.get("score_evidence") or {}
+    source = evidence.get(metric)
+    if isinstance(source, dict):
+        source = source.get("source")
+    return str(source) if source is not None else None
+
+
+def _trusted_metric_values(scene_feedback: list[dict], metric: str) -> tuple[list[float], int]:
+    accepted: list[float] = []
+    ignored = 0
+    for scene in scene_feedback:
+        score = _valid_numeric_score((scene.get("scores") or {}).get(metric))
+        if score is None:
+            continue
+        if _score_source(scene, metric) not in TRUSTED_SCORE_SOURCES:
+            ignored += 1
+            continue
+        accepted.append(score)
+    return accepted, ignored
 
 
 def update_policy_from_feedback(state_root: Path, feedback_packet: dict) -> dict:
     policy = load_policy(state_root)
-    scene_feedback = feedback_packet.get("scene_feedback", [])
-    beat = average([s.get("scores", {}).get("beat_sync") for s in scene_feedback])
-    motion = average([s.get("scores", {}).get("motion_intent_match") for s in scene_feedback])
-    camera = average([s.get("scores", {}).get("camera_intent_match") for s in scene_feedback])
-    obedience = average([s.get("scores", {}).get("prompt_obedience") for s in scene_feedback])
-    visual = average([s.get("scores", {}).get("visual_quality") for s in scene_feedback])
+    scene_feedback = feedback_packet.get("scene_feedback", []) or []
+
+    metric_values = {}
+    ignored_counts = {}
+    for metric in (
+        "beat_sync",
+        "motion_intent_match",
+        "camera_intent_match",
+        "prompt_obedience",
+        "visual_quality",
+    ):
+        values, ignored = _trusted_metric_values(scene_feedback, metric)
+        metric_values[metric] = values
+        ignored_counts[metric] = ignored
+
+    beat = average(metric_values["beat_sync"])
+    motion = average(metric_values["motion_intent_match"])
+    camera = average(metric_values["camera_intent_match"])
+    obedience = average(metric_values["prompt_obedience"])
+    visual = average(metric_values["visual_quality"])
 
     if beat is not None:
         update_weight(policy, "simple_downbeat_locked_choreo", beat)
@@ -105,6 +157,13 @@ def update_policy_from_feedback(state_root: Path, feedback_packet: dict) -> dict
         learned["camera_motion_delta"] = round(clamp((0.75 - camera) * 0.20, -0.20, 0.20), 4)
     if visual is not None and visual < 0.60:
         learned["guidance_scale_delta"] = round(clamp(float(learned.get("guidance_scale_delta", 0.0)) - 0.25, -2.0, 2.0), 4)
+
+    policy["last_feedback_evidence"] = {
+        "accepted_score_counts": {metric: len(values) for metric, values in metric_values.items()},
+        "ignored_unproven_score_counts": ignored_counts,
+        "trusted_sources": sorted(TRUSTED_SCORE_SOURCES),
+        "policy_updated_from_scores": any(metric_values.values()),
+    }
 
     write_json(policy_path(state_root), policy)
     return policy
