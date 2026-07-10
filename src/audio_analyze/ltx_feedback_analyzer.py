@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import argparse
 import json
+import math
 
 try:
     from .ltx_feature_extractor import extract_from_state, write_features_jsonl
@@ -10,6 +11,10 @@ try:
 except ImportError:
     from ltx_feature_extractor import extract_from_state, write_features_jsonl
     from ltx_policy_store import update_policy_from_feedback, load_policy, choose_best_strategies
+
+
+SCORE_SOURCE_HUMAN = "human_scorecard"
+SCORE_SOURCE_MISSING = "missing"
 
 
 def read_json(path: Path, default=None):
@@ -26,17 +31,52 @@ def write_json(path: Path, data) -> Path:
     return path
 
 
+def score_or_none(value) -> float | None:
+    """Return a normalized score only when explicit numeric evidence exists."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(score):
+        return None
+    if 1.0 < score <= 10.0:
+        score /= 10.0
+    if score < 0.0 or score > 1.0:
+        return None
+    return score
+
+
 def score_or_default(value, default: float) -> float:
-    return float(value) if isinstance(value, (int, float)) else default
+    """Backward-compatible helper; new feedback logic does not synthesize defaults."""
+    score = score_or_none(value)
+    return score if score is not None else default
+
+
+def _rounded_score(value: float | None) -> float | None:
+    return round(value, 3) if value is not None else None
 
 
 def analyze_feature(row: dict) -> dict:
-    scores = row.get("human_scores", {}) or {}
-    beat_sync = score_or_default(scores.get("beat_sync"), 0.65)
-    motion_match = score_or_default(scores.get("motion_match"), 0.65)
-    camera_match = score_or_default(scores.get("camera_match"), 0.65)
-    visual_quality = score_or_default(scores.get("visual_quality"), 0.70)
-    prompt_obedience = score_or_default(scores.get("prompt_obedience"), 0.60)
+    raw_scores = row.get("human_scores", {}) or {}
+    score_values = {
+        "beat_sync": score_or_none(raw_scores.get("beat_sync")),
+        "motion_intent_match": score_or_none(raw_scores.get("motion_match")),
+        "camera_intent_match": score_or_none(raw_scores.get("camera_match")),
+        "visual_quality": score_or_none(raw_scores.get("visual_quality")),
+        "prompt_obedience": score_or_none(raw_scores.get("prompt_obedience")),
+    }
+    score_evidence = {
+        metric: SCORE_SOURCE_HUMAN if value is not None else SCORE_SOURCE_MISSING
+        for metric, value in score_values.items()
+    }
+
+    beat_sync = score_values["beat_sync"]
+    motion_match = score_values["motion_intent_match"]
+    camera_match = score_values["camera_intent_match"]
+    visual_quality = score_values["visual_quality"]
+    prompt_obedience = score_values["prompt_obedience"]
 
     issues = []
     adjustments = {}
@@ -44,19 +84,19 @@ def analyze_feature(row: dict) -> dict:
     if row.get("status") == "failed":
         issues.append("generation_failed")
         adjustments["retry_scene"] = True
-    if beat_sync < 0.72:
+    if beat_sync is not None and beat_sync < 0.72:
         issues.append("weak_beat_sync")
         adjustments["increase_downbeat_locking"] = True
         adjustments["audio_offset_seconds"] = -0.10
-    if motion_match < 0.70:
+    if motion_match is not None and motion_match < 0.70:
         issues.append("motion_intent_mismatch")
         adjustments["motion_intensity_delta"] = 0.12
         adjustments["simplify_motion_plan"] = True
-    if camera_match < 0.70:
+    if camera_match is not None and camera_match < 0.70:
         issues.append("camera_intent_mismatch")
         adjustments["camera_motion_delta"] = 0.10
         adjustments["isolate_camera_directive"] = True
-    if prompt_obedience < 0.65:
+    if prompt_obedience is not None and prompt_obedience < 0.65:
         issues.append("prompt_obedience_low")
         adjustments["prompt_compression"] = True
         adjustments["reduce_conflicting_directives"] = True
@@ -72,19 +112,30 @@ def analyze_feature(row: dict) -> dict:
     if row.get("camera_directive_count", 0) > 12:
         issues.append("camera_overload")
         adjustments["isolate_camera_directive"] = True
-    if visual_quality >= 0.80 and motion_match >= 0.75 and camera_match >= 0.75:
+    if (
+        visual_quality is not None
+        and motion_match is not None
+        and camera_match is not None
+        and visual_quality >= 0.80
+        and motion_match >= 0.75
+        and camera_match >= 0.75
+    ):
         issues.append("winning_pattern_candidate")
         adjustments["preserve_successful_phrasing"] = True
 
+    scored_metrics = [
+        metric for metric, source in score_evidence.items() if source == SCORE_SOURCE_HUMAN
+    ]
+    unscored_metrics = [
+        metric for metric, source in score_evidence.items() if source == SCORE_SOURCE_MISSING
+    ]
+
     return {
         "scene_id": row.get("clip_index"),
-        "scores": {
-            "beat_sync": round(beat_sync, 3),
-            "motion_intent_match": round(motion_match, 3),
-            "camera_intent_match": round(camera_match, 3),
-            "prompt_obedience": round(prompt_obedience, 3),
-            "visual_quality": round(visual_quality, 3),
-        },
+        "scores": {metric: _rounded_score(value) for metric, value in score_values.items()},
+        "score_evidence": score_evidence,
+        "scored_metrics": scored_metrics,
+        "unscored_metrics": unscored_metrics,
         "detected_issues": issues,
         "recommended_adjustments": adjustments,
         "source_features": row,
@@ -92,7 +143,13 @@ def analyze_feature(row: dict) -> dict:
 
 
 def average(values):
-    vals = [v for v in values if isinstance(v, (int, float))]
+    vals = [
+        float(value)
+        for value in values
+        if isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    ]
     return round(sum(vals) / len(vals), 3) if vals else None
 
 
@@ -112,6 +169,8 @@ def build_feedback_packet(state_root: Path) -> dict:
         "avg_camera_match": average([s["scores"]["camera_intent_match"] for s in scene_feedback]),
         "avg_prompt_obedience": average([s["scores"]["prompt_obedience"] for s in scene_feedback]),
         "avg_visual_quality": average([s["scores"]["visual_quality"] for s in scene_feedback]),
+        "scored_scene_count": sum(1 for scene in scene_feedback if scene.get("scored_metrics")),
+        "fully_unscored_scene_count": sum(1 for scene in scene_feedback if not scene.get("scored_metrics")),
     }
 
     all_issues = []
