@@ -4,9 +4,9 @@ Date: 2026-07-10
 
 Branch: `audit/repo-cleanup-2026-07-10`
 
-## Completed: score-evidence safeguard
+## Completed in code: score-evidence safeguard
 
-The first high-priority audit finding has been addressed on the audit branch.
+The first high-priority audit finding has been addressed in code on the audit branch.
 
 ### Problem
 
@@ -33,4 +33,4 @@ The first high-priority audit finding has been addressed on the audit branch.
 
 ### Validation status
 
-The GitHub connector can write and inspect repository files but cannot execute the local Python test suite in this session. The new tests must be run by GitHub Actions or locally before merge.
+Implementation is committed but not yet marked merge-ready. The GitHub connector can write and inspect repository files but cannot execute the local Python test suite in this session. The new targeted tests and then the full suite must pass through GitHub Actions or locally before merge.
