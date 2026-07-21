@@ -302,6 +302,7 @@ def synthesize_final_ltx_prompt(
                 "source_native_analysis_chars": len(native),
                 "final_prompt": prompt,
                 "final_prompt_char_count": len(prompt),
+                "seed_description": visual,
                 "seed_description_char_count": len(visual),
                 "hard_limit_chars": int(max_chars),
                 "target_min_chars": effective_target_min,
