@@ -38,27 +38,20 @@ class FakeSession:
 
 
 class FakeVisionClient:
-    def __init__(self, response, text_response=None):
+    def __init__(self, response):
         self.response = response
-        self.text_response = text_response
         self.calls = []
         self.text_calls = []
 
     def chat_text_with_images(self, system, user, image_paths):
         self.calls.append(
-            {
-                "system": system,
-                "user": user,
-                "image_paths": list(image_paths),
-            }
+            {"system": system, "user": user, "image_paths": list(image_paths)}
         )
         return self.response
 
     def chat_text(self, system, user):
         self.text_calls.append({"system": system, "user": user})
-        if self.text_response is None:
-            raise AssertionError("Unexpected orchestrator-selection call")
-        return self.text_response
+        raise AssertionError("Native image analysis must not make a summary-selection call")
 
 
 def sample_plan():
@@ -134,7 +127,6 @@ def test_subject_count_does_not_treat_two_props_as_two_people():
         "woman in studio",
         "One woman stands between two chairs with two windows behind her.",
     )
-
     assert policy["has_pair"] is False
     assert policy["multiple_subjects"] is False
     assert "missing foreground partner" not in policy["negative_terms"]
@@ -146,7 +138,6 @@ def test_subject_count_accepts_explicit_two_subject_description():
         "studio",
         "Two visible dancers stand together in the foreground.",
     )
-
     assert policy["has_pair"] is True
     assert policy["multiple_subjects"] is True
 
@@ -162,7 +153,6 @@ def test_template_provider_disables_vision_by_default():
         expander=fake_expander,
         image_analyzer=forbidden_analyzer,
     )
-
     assert patched["seed_image_analysis"]["status"] == "disabled"
     assert patched["seed_image_analysis"]["enabled"] is False
     assert patched["results"][0]["seed_image_analysis"]["status"] == "disabled"
@@ -190,7 +180,6 @@ def test_template_provider_can_explicitly_force_vision_analysis():
         analyze_images=True,
         vision_model="gemma3:4b",
     )
-
     assert calls == [("inputs/ltx_seed_images/scene_01_subject.png", "gemma3:4b")]
     assert patched["seed_image_analysis"]["status"] == "applied"
 
@@ -217,7 +206,6 @@ def test_vision_model_is_separate_from_expansion_model():
         expander=fake_expander,
         image_analyzer=recording_analyzer,
     )
-
     assert calls["model"] == "gemma3:4b"
     assert patched["results"][0]["prompt_expansion_model"] == "gpt-4o"
     assert patched["results"][0]["seed_image_analysis"]["model"] == "gemma3:4b"
@@ -225,7 +213,6 @@ def test_vision_model_is_separate_from_expansion_model():
 
 def test_freeform_prompts_remove_checklist_and_word_limit():
     combined = f"{VISION_SYSTEM_PROMPT}\n{VISION_USER_PROMPT}".lower()
-
     assert "no required checklist" in combined
     assert "word limit" in combined
     assert "60 and 140" not in combined
@@ -251,15 +238,13 @@ def test_native_analysis_is_preserved_without_reformatting(tmp_path):
     assert result["description_char_count"] == len(native_response)
     assert result["description_line_count"] == len(native_response.splitlines())
     assert result["prompt_context"] == native_response
-    assert result["prompt_context_selection"] == "full_native_analysis"
+    assert result["prompt_context_selection"] == "full_native_analysis_unmodified"
     assert client.calls[0]["system"] == VISION_SYSTEM_PROMPT
     assert client.calls[0]["user"] == VISION_USER_PROMPT
+    assert client.text_calls == []
 
 
-def test_long_native_analysis_is_preserved_while_orchestrator_selects_context(
-    tmp_path,
-    monkeypatch,
-):
+def test_long_native_analysis_is_not_resummarized(tmp_path):
     image = tmp_path / "seed.png"
     image.write_bytes(b"image-bytes")
     native_response = (
@@ -267,31 +252,21 @@ def test_long_native_analysis_is_preserved_while_orchestrator_selects_context(
         "architecture, pose, composition, texture, atmosphere, and implied action. "
         * 30
     )
-    selected_context = (
-        "Two foreground dancers remain the visual focus inside a sunlit cathedral. "
-        "Warm stained-glass light, white-and-gold styling, a visible choir, and the "
-        "existing low camera perspective must remain consistent."
-    )
-    client = FakeVisionClient(native_response, text_response=selected_context)
-    monkeypatch.setenv("OLLAMA_VISION_PROMPT_CONTEXT_CHARS", "500")
+    client = FakeVisionClient(native_response)
 
     result = analyze_seed_image(image, model="gemma3:4b", client=client)
     prompt_block = render_seed_image_description_block(result)
 
     assert result["description"] == native_response
-    assert len(result["description"]) > 500
-    assert result["prompt_context"] == selected_context
-    assert result["prompt_context_selection"] == "ollama_orchestrator_selection"
-    assert selected_context in prompt_block
-    assert native_response not in prompt_block
-    assert len(client.text_calls) == 1
+    assert result["prompt_context"] == native_response
+    assert result["prompt_context_selection"] == "full_native_analysis_unmodified"
+    assert native_response in prompt_block
+    assert client.text_calls == []
 
 
 def test_vision_config_allows_longer_native_output(monkeypatch):
     monkeypatch.delenv("OLLAMA_VISION_NUM_PREDICT", raising=False)
     monkeypatch.delenv("OLLAMA_VISION_TIMEOUT_SECONDS", raising=False)
-
     config = _vision_config("gemma3:4b")
-
     assert config.num_predict == 2048
     assert config.timeout_seconds >= 600
