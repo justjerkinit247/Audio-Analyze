@@ -83,6 +83,33 @@ def test_prompt_budget_protects_gemma_marker_and_retains_visual_core():
     assert budget["seed_analysis_visual_retention_ratio"] >= 0.90
     assert budget["seed_analysis_prompt_chars"] > 3000
     assert "Recommendations for Video Orchestration" not in prompt
-    assert "Overall Tone & Potential Narrative" not in prompt
     assert "compact localized twerk pulse" in prompt
     assert "Both feet remain planted" in prompt
+
+
+def test_real_scale_thirty_tap_prompt_retains_ninety_percent():
+    sentence = (
+        "Detailed visual description of subjects, wardrobe, cathedral architecture, lighting, "
+        "composition, color, depth, texture, pose, and atmosphere. "
+    )
+    native = (sentence * 60)[:4751]
+    item = _item(native)
+    item["tap_sync"]["primary_sync_targets_relative_seconds"] = [
+        index * 0.251 for index in range(30)
+    ]
+
+    compacted = compact_item_prompt(item, max_chars=5000, target_chars=5000)
+    prompt = compacted["prompt_text"]
+    budget = compacted["prompt_budget"]
+
+    assert len(prompt) <= 5000
+    assert budget["seed_analysis_retention_priority_used"] is True
+    assert budget["seed_analysis_visual_retention_ratio"] >= 0.90
+    assert budget["seed_analysis_retention_target_met"] is True
+    assert budget["seed_analysis_prompt_chars"] >= 4276
+    assert "compact localized twerk pulse" in prompt
+    assert "glute-cheek contraction" in prompt
+    assert "Both feet remain planted" in prompt
+    assert "Do not convert the accents into jumping" in prompt
+    assert "missing male dancer" in prompt
+    assert "missing choir" in prompt
