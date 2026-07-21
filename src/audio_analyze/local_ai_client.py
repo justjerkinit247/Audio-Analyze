@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterable
 
 import requests
 
@@ -32,7 +34,10 @@ class LocalAIConfig:
 
         return cls(
             provider=os.environ.get("LOCAL_AI_PROVIDER", "ollama").strip() or "ollama",
-            base_url=(os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434").rstrip("/"),
+            base_url=(
+                os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip()
+                or "http://127.0.0.1:11434"
+            ).rstrip("/"),
             model=model or os.environ.get("OLLAMA_MODEL", "gemma3:4b").strip() or "gemma3:4b",
             timeout_seconds=timeout_seconds,
         )
@@ -63,6 +68,16 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return data
 
 
+def encode_image_base64(image_path: str | Path) -> str:
+    path = Path(image_path).expanduser().resolve()
+    if not path.is_file():
+        raise LocalAIError(f"Image file not found: {path}")
+    try:
+        return base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise LocalAIError(f"Unable to read image file {path}: {exc}") from exc
+
+
 class LocalAIClient:
     def __init__(self, config: LocalAIConfig | None = None, session: Any = None) -> None:
         self.config = config or LocalAIConfig.from_env()
@@ -70,7 +85,18 @@ class LocalAIClient:
             raise LocalAIError(f"Unsupported local AI provider: {self.config.provider}")
         self.session = session or requests
 
-    def _chat_payload(self, system: str, user: str, json_mode: bool = False) -> dict[str, Any]:
+    def _chat_payload(
+        self,
+        system: str,
+        user: str,
+        json_mode: bool = False,
+        images: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
+        user_message: dict[str, Any] = {"role": "user", "content": str(user or "")}
+        image_values = [str(value) for value in (images or []) if str(value)]
+        if image_values:
+            user_message["images"] = image_values
+
         payload: dict[str, Any] = {
             "model": self.config.model,
             "stream": False,
@@ -80,7 +106,7 @@ class LocalAIClient:
             },
             "messages": [
                 {"role": "system", "content": str(system or "")},
-                {"role": "user", "content": str(user or "")},
+                user_message,
             ],
         }
         if json_mode:
@@ -104,8 +130,8 @@ class LocalAIClient:
             raise LocalAIError("Ollama response was not a JSON object.")
         return data
 
-    def chat_text(self, system: str, user: str) -> str:
-        data = self._post_chat(self._chat_payload(system, user, json_mode=False))
+    @staticmethod
+    def _message_content(data: dict[str, Any]) -> str:
         message = data.get("message", {})
         content = message.get("content", "") if isinstance(message, dict) else ""
         content = str(content).strip()
@@ -113,14 +139,30 @@ class LocalAIClient:
             raise LocalAIError("Ollama returned no message content.")
         return content
 
+    def chat_text(self, system: str, user: str) -> str:
+        data = self._post_chat(self._chat_payload(system, user, json_mode=False))
+        return self._message_content(data)
+
+    def chat_text_with_images(
+        self,
+        system: str,
+        user: str,
+        image_paths: Iterable[str | Path],
+    ) -> str:
+        encoded_images = [encode_image_base64(path) for path in image_paths]
+        if not encoded_images:
+            raise LocalAIError("At least one image is required for vision analysis.")
+        data = self._post_chat(
+            self._chat_payload(system, user, json_mode=False, images=encoded_images)
+        )
+        return self._message_content(data)
+
     def chat_json(self, system: str, user: str, schema_hint: str | None = None) -> dict[str, Any]:
         prompt = str(user or "")
         if schema_hint:
             prompt = f"{prompt}\n\nJSON schema/context hint:\n{schema_hint}"
         data = self._post_chat(self._chat_payload(system, prompt, json_mode=True))
-        message = data.get("message", {})
-        content = message.get("content", "") if isinstance(message, dict) else ""
-        return extract_json_object(str(content))
+        return extract_json_object(self._message_content(data))
 
     def health_check(self) -> dict[str, Any]:
         url = f"{self.config.base_url}/api/tags"
