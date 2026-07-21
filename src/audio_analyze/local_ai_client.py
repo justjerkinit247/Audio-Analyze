@@ -70,7 +70,17 @@ class LocalAIClient:
             raise LocalAIError(f"Unsupported local AI provider: {self.config.provider}")
         self.session = session or requests
 
-    def _chat_payload(self, system: str, user: str, json_mode: bool = False) -> dict[str, Any]:
+    def _chat_payload(
+        self,
+        system: str,
+        user: str,
+        json_mode: bool = False,
+        images: list[str] | None = None,
+    ) -> dict[str, Any]:
+        user_message: dict[str, Any] = {"role": "user", "content": str(user or "")}
+        if images:
+            user_message["images"] = [str(image) for image in images if str(image).strip()]
+
         payload: dict[str, Any] = {
             "model": self.config.model,
             "stream": False,
@@ -80,7 +90,7 @@ class LocalAIClient:
             },
             "messages": [
                 {"role": "system", "content": str(system or "")},
-                {"role": "user", "content": str(user or "")},
+                user_message,
             ],
         }
         if json_mode:
@@ -104,8 +114,15 @@ class LocalAIClient:
             raise LocalAIError("Ollama response was not a JSON object.")
         return data
 
-    def chat_text(self, system: str, user: str) -> str:
-        data = self._post_chat(self._chat_payload(system, user, json_mode=False))
+    def chat_text(
+        self,
+        system: str,
+        user: str,
+        images: list[str] | None = None,
+    ) -> str:
+        data = self._post_chat(
+            self._chat_payload(system, user, json_mode=False, images=images)
+        )
         message = data.get("message", {})
         content = message.get("content", "") if isinstance(message, dict) else ""
         content = str(content).strip()

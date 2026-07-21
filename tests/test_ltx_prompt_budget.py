@@ -2,6 +2,7 @@ from audio_analyze.ltx_prompt_budget import (
     AUDIO_TIMING_MARKER,
     MOTION_MARKER,
     NEGATIVE_MARKER,
+    SCENE_DESCRIPTION_MARKER,
     SUBJECT_LOCK_MARKER,
     TAP_SYNC_MARKER,
     compact_item_prompt,
@@ -62,9 +63,14 @@ def long_duet_item():
     ] + [f"learned negative condition {index}" for index in range(80)]
     negative = ", ".join(negative_terms)
     timestamps = ", ".join(f"{index * 0.321:.3f}s" for index in range(25))
+    scene_description = (
+        "Two adult performers occupy the foreground in a full-body vertical composition. "
+        "A choir remains visible behind them in a bright cathedral with warm white and gold lighting."
+    )
     prompt = (
         "Audio-and-image-to-video continuation synchronized to the supplied audio for a very long mashup title. "
         "Use the supplied audio as the timing source and the seed image as the authoritative visual source.\n\n"
+        f"[SCENE_DESCRIPTION]\nObservable opening-frame description: {scene_description}\n\n"
         "[SUBJECT_LOCK]\nThe seed image is authoritative for subject count and body layout. Preserve everybody.\n\n"
         "[AUDIO_TIMING]\n" + "Very verbose audio timing explanation. " * 35 + "\n\n"
         f"[TAP_SYNC]\nPrimary tap-accent times inside this clip: {timestamps}. "
@@ -85,6 +91,7 @@ def long_duet_item():
             "scene_01_cathedral_gospel_twerk_duet_woman_man_partner_"
             "white_gold_choir_glute_cheek_pulses.png"
         ),
+        "scene_description": scene_description,
         "subject_count_policy": {
             "has_pair": True,
             "has_choir": True,
@@ -125,6 +132,7 @@ def test_compacts_long_prompt_under_safe_target_without_losing_contract():
     assert compacted["prompt_budget"]["before_chars"] > 5000
     assert compacted["prompt_budget"]["after_chars"] == len(prompt)
     for marker in (
+        SCENE_DESCRIPTION_MARKER,
         SUBJECT_LOCK_MARKER,
         AUDIO_TIMING_MARKER,
         TAP_SYNC_MARKER,
@@ -134,6 +142,8 @@ def test_compacts_long_prompt_under_safe_target_without_losing_contract():
         assert marker in prompt
     assert "Audio-and-image-to-video continuation" in prompt
     assert "Seed image filename used as the Ollama prompt hint:" in prompt
+    assert "Two adult performers occupy the foreground" in prompt
+    assert compacted["prompt_budget"]["scene_description_preserved"] is True
     assert "female lead dancer and male dance partner" in prompt
     assert "choir" in prompt
     assert "compact localized twerk pulse" in prompt
@@ -153,6 +163,7 @@ def test_compact_plan_records_plan_level_budget_metadata():
     assert compacted["prompt_budget"]["status"] == "applied"
     assert compacted["prompt_budget"]["scene_count"] == 1
     assert compacted["prompt_budget"]["max_after_chars"] <= 4800
+    assert compacted["prompt_budget"]["scene_description_preserved"] is True
     assert compacted["results"][0]["prompt_budget"]["policy"] == (
-        "compact_after_ollama_asmo_subject_lock_and_tap_sync"
+        "compact_after_ollama_vision_asmo_subject_lock_and_tap_sync"
     )
