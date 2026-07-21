@@ -12,6 +12,7 @@ from audio_analyze.ltx_seed_image_analyzer import (
     VISION_USER_PROMPT,
     _vision_config,
     analyze_seed_image,
+    render_seed_image_description_block,
 )
 
 
@@ -37,9 +38,11 @@ class FakeSession:
 
 
 class FakeVisionClient:
-    def __init__(self, response):
+    def __init__(self, response, text_response=None):
         self.response = response
+        self.text_response = text_response
         self.calls = []
+        self.text_calls = []
 
     def chat_text_with_images(self, system, user, image_paths):
         self.calls.append(
@@ -50,6 +53,12 @@ class FakeVisionClient:
             }
         )
         return self.response
+
+    def chat_text(self, system, user):
+        self.text_calls.append({"system": system, "user": user})
+        if self.text_response is None:
+            raise AssertionError("Unexpected orchestrator-selection call")
+        return self.text_response
 
 
 def sample_plan():
@@ -241,8 +250,41 @@ def test_native_analysis_is_preserved_without_reformatting(tmp_path):
     assert result["observation_policy"] == "freeform_native_visual_analysis"
     assert result["description_char_count"] == len(native_response)
     assert result["description_line_count"] == len(native_response.splitlines())
+    assert result["prompt_context"] == native_response
+    assert result["prompt_context_selection"] == "full_native_analysis"
     assert client.calls[0]["system"] == VISION_SYSTEM_PROMPT
     assert client.calls[0]["user"] == VISION_USER_PROMPT
+
+
+def test_long_native_analysis_is_preserved_while_orchestrator_selects_context(
+    tmp_path,
+    monkeypatch,
+):
+    image = tmp_path / "seed.png"
+    image.write_bytes(b"image-bytes")
+    native_response = (
+        "Complete native analysis paragraph with detailed camera, lighting, wardrobe, "
+        "architecture, pose, composition, texture, atmosphere, and implied action. "
+        * 30
+    )
+    selected_context = (
+        "Two foreground dancers remain the visual focus inside a sunlit cathedral. "
+        "Warm stained-glass light, white-and-gold styling, a visible choir, and the "
+        "existing low camera perspective must remain consistent."
+    )
+    client = FakeVisionClient(native_response, text_response=selected_context)
+    monkeypatch.setenv("OLLAMA_VISION_PROMPT_CONTEXT_CHARS", "500")
+
+    result = analyze_seed_image(image, model="gemma3:4b", client=client)
+    prompt_block = render_seed_image_description_block(result)
+
+    assert result["description"] == native_response
+    assert len(result["description"]) > 500
+    assert result["prompt_context"] == selected_context
+    assert result["prompt_context_selection"] == "ollama_orchestrator_selection"
+    assert selected_context in prompt_block
+    assert native_response not in prompt_block
+    assert len(client.text_calls) == 1
 
 
 def test_vision_config_allows_longer_native_output(monkeypatch):
