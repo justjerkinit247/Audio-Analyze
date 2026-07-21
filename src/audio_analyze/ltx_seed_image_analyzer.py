@@ -16,32 +16,23 @@ except ImportError:
 DEFAULT_OLLAMA_VISION_MODEL = "gemma3:4b"
 DEFAULT_OLLAMA_VISION_NUM_PREDICT = 2048
 DEFAULT_OLLAMA_VISION_TIMEOUT_SECONDS = 600
-DEFAULT_OLLAMA_VISION_PROMPT_CONTEXT_CHARS = 1400
 SEED_IMAGE_DESCRIPTION_MARKER = "[SEED_IMAGE_DESCRIPTION]"
 VISION_ANALYSIS_MODE = "freeform_native"
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 VISION_SYSTEM_PROMPT = (
-    "You are an expert visual analyst. Your complete response will be preserved and supplied "
-    "to a downstream image-to-video orchestrator. Analyze the supplied image independently, "
-    "freely, thoroughly, and naturally. Use your own judgment about what is visually important. "
+    "You are an expert visual analyst. Analyze the supplied image independently, freely, "
+    "thoroughly, and naturally. Use your own judgment about what is visually important. "
     "There is no required checklist, schema, response format, or word limit. Return the full "
     "analysis you would ordinarily provide when asked to analyze an image."
 )
 
 VISION_USER_PROMPT = (
     "Analyze this seed image thoroughly for an image-to-video project. Return your complete "
-    "native analysis. Include anything you judge visually meaningful or useful, and do not "
-    "shorten, summarize, or force the response into a predefined structure. The downstream "
-    "orchestrator will decide what to use."
-)
-
-PROMPT_CONTEXT_SYSTEM_PROMPT = (
-    "You are the downstream image-to-video orchestrator selecting visual context from a complete "
-    "native image analysis. Preserve the most useful current-frame facts for generation: visible "
-    "subjects and relationships, pose and body layout, framing and camera perspective, environment, "
-    "lighting, composition, style, atmosphere, textures, props, and unusual constraints. Do not "
-    "invent details. Return only the selected visual context as natural-language prose."
+    "native analysis. Include anything you judge visually meaningful or useful. Do not shorten, "
+    "summarize, or force the response into a predefined structure. Your complete response will "
+    "be preserved, and the downstream orchestrator will fit its visual substance into the final "
+    "generation prompt."
 )
 
 
@@ -73,54 +64,11 @@ def _vision_config(model: str) -> LocalAIConfig:
 
 
 def _clean_description(value: str) -> str:
+    # Preserve Gemma's native formatting and wording. Only surrounding whitespace is removed.
     text = str(value or "").strip()
     if not text:
         raise LocalAIError("Ollama returned an empty seed-image description.")
     return text
-
-
-def _fallback_prompt_context(description: str, max_chars: int) -> str:
-    if len(description) <= max_chars:
-        return description
-
-    candidate = description[:max_chars].rstrip()
-    sentence_end = max(candidate.rfind("."), candidate.rfind("!"), candidate.rfind("?"))
-    if sentence_end >= max_chars // 2:
-        candidate = candidate[: sentence_end + 1]
-    return candidate.rstrip()
-
-
-def _select_prompt_context(
-    description: str,
-    *,
-    client: Any,
-    max_chars: int,
-) -> tuple[str, str]:
-    if len(description) <= max_chars:
-        return description, "full_native_analysis"
-
-    user_prompt = (
-        f"Select the most useful visual context from the complete analysis below. "
-        f"Keep the result at or below {max_chars} characters so it can fit inside the final "
-        "LTX prompt. The complete analysis remains preserved separately.\n\n"
-        f"COMPLETE NATIVE ANALYSIS:\n{description}"
-    )
-
-    try:
-        selected = _clean_description(
-            client.chat_text(
-                PROMPT_CONTEXT_SYSTEM_PROMPT,
-                user_prompt,
-            )
-        )
-    except Exception:
-        return _fallback_prompt_context(description, max_chars), "deterministic_fallback"
-
-    if len(selected) > max_chars:
-        selected = _fallback_prompt_context(selected, max_chars)
-        return selected, "ollama_selection_trimmed"
-
-    return selected, "ollama_orchestrator_selection"
 
 
 def analyze_seed_image(
@@ -150,15 +98,6 @@ def analyze_seed_image(
             [path],
         )
     )
-    prompt_context_limit = _env_positive_int(
-        "OLLAMA_VISION_PROMPT_CONTEXT_CHARS",
-        DEFAULT_OLLAMA_VISION_PROMPT_CONTEXT_CHARS,
-    )
-    prompt_context, prompt_context_selection = _select_prompt_context(
-        description,
-        client=active_client,
-        max_chars=prompt_context_limit,
-    )
 
     return {
         "status": "complete",
@@ -169,10 +108,10 @@ def analyze_seed_image(
         "description": description,
         "description_char_count": len(description),
         "description_line_count": len(description.splitlines()),
-        "prompt_context": prompt_context,
-        "prompt_context_char_count": len(prompt_context),
-        "prompt_context_limit_chars": prompt_context_limit,
-        "prompt_context_selection": prompt_context_selection,
+        # Keep compatibility with the prompt builder, but do not summarize or select here.
+        "prompt_context": description,
+        "prompt_context_char_count": len(description),
+        "prompt_context_selection": "full_native_analysis_unmodified",
         "image_path": serialize_path(path),
         "image_path_resolved": str(path.resolve()),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
