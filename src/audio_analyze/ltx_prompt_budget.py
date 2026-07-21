@@ -6,12 +6,14 @@ from typing import Any
 import re
 
 
+SCENE_DESCRIPTION_MARKER = "[SCENE_DESCRIPTION]"
 SUBJECT_LOCK_MARKER = "[SUBJECT_LOCK]"
 AUDIO_TIMING_MARKER = "[AUDIO_TIMING]"
 TAP_SYNC_MARKER = "[TAP_SYNC]"
 MOTION_MARKER = "[MOTION_PROMPT]"
 NEGATIVE_MARKER = "[NEGATIVE_PROMPT]"
 MARKERS = [
+    SCENE_DESCRIPTION_MARKER,
     SUBJECT_LOCK_MARKER,
     AUDIO_TIMING_MARKER,
     TAP_SYNC_MARKER,
@@ -83,7 +85,7 @@ def _format_float(value: Any, digits: int = 2) -> str:
 def _split_prompt(prompt_text: str) -> tuple[str, dict[str, str]]:
     text = str(prompt_text or "")
     pattern = re.compile(
-        r"(?m)^\s*(\[SUBJECT_LOCK\]|\[AUDIO_TIMING\]|\[TAP_SYNC\]|\[MOTION_PROMPT\]|\[NEGATIVE_PROMPT\])\s*$"
+        r"(?m)^\s*(\[SCENE_DESCRIPTION\]|\[SUBJECT_LOCK\]|\[AUDIO_TIMING\]|\[TAP_SYNC\]|\[MOTION_PROMPT\]|\[NEGATIVE_PROMPT\])\s*$"
     )
     matches = list(pattern.finditer(text))
     if not matches:
@@ -116,9 +118,48 @@ def _compact_prefix(item: dict[str, Any]) -> str:
     )
     return (
         "Audio-and-image-to-video continuation synchronized to the supplied audio. "
-        "Use audio as the timing source and the seed image as authoritative for subject count, identity, pose family, body layout, framing, lighting, and background. "
+        "Use audio as the timing source and the seed image pixels as authoritative for subject count, identity, pose family, body layout, framing, lighting, and background. "
         f"Seed image filename used as the Ollama prompt hint: {filename}. "
-        "Preserve the filename-directed scene and visible seed composition; do not import unrelated prior-project assumptions."
+        "Use the natural-language pixel description as primary visual context and the filename as a secondary clue; do not import unrelated prior-project assumptions."
+    )
+
+
+def _truncate_at_boundary(text: str, limit: int) -> str:
+    cleaned = _clean_inline(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    candidate = cleaned[: max(1, limit - 1)].rstrip()
+    boundary = max(candidate.rfind(". "), candidate.rfind("; "), candidate.rfind(", "))
+    if boundary >= int(limit * 0.55):
+        candidate = candidate[: boundary + 1].rstrip()
+    else:
+        word_boundary = candidate.rfind(" ")
+        if word_boundary > 0:
+            candidate = candidate[:word_boundary]
+    return candidate.rstrip(" ,;:") + "."
+
+
+def _compact_scene_description(item: dict[str, Any], existing: str) -> str:
+    description = _clean_inline(item.get("scene_description") or existing)
+    if description.lower().startswith("observable opening-frame description:"):
+        description = description.split(":", 1)[1].strip()
+    policy_suffix = " This block describes the starting pixels only."
+    if "this block describes the starting pixels only" in description.lower():
+        description = re.split(
+            r"this block describes the starting pixels only",
+            description,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip()
+    if not description:
+        description = (
+            "No natural-language pixel description was available; use the supplied seed image itself as the visual authority."
+        )
+    return (
+        "Observable opening-frame description: "
+        + _truncate_at_boundary(description, 850)
+        + policy_suffix
+        + " It does not override audio timing, choreography policy, tap synchronization, or subject locks."
     )
 
 
@@ -238,21 +279,6 @@ def _compact_tap_sync(item: dict[str, Any], existing: str) -> str:
     )
 
 
-def _truncate_at_boundary(text: str, limit: int) -> str:
-    cleaned = _clean_inline(text)
-    if len(cleaned) <= limit:
-        return cleaned
-    candidate = cleaned[: max(1, limit - 1)].rstrip()
-    boundary = max(candidate.rfind(". "), candidate.rfind("; "), candidate.rfind(", "))
-    if boundary >= int(limit * 0.55):
-        candidate = candidate[: boundary + 1].rstrip()
-    else:
-        word_boundary = candidate.rfind(" ")
-        if word_boundary > 0:
-            candidate = candidate[:word_boundary]
-    return candidate.rstrip(" ,;:") + "."
-
-
 def _compact_motion(item: dict[str, Any], existing: str, limit: int) -> str:
     expansion = item.get("filename_hint_expansion") or {}
     source = _clean_inline(expansion.get("ltx_motion_prompt") or existing)
@@ -320,6 +346,10 @@ def compact_item_prompt(
     _, parsed = _split_prompt(original)
 
     sections = {
+        SCENE_DESCRIPTION_MARKER: _compact_scene_description(
+            item,
+            parsed.get(SCENE_DESCRIPTION_MARKER, ""),
+        ),
         SUBJECT_LOCK_MARKER: _compact_subject_lock(item, parsed.get(SUBJECT_LOCK_MARKER, "")),
         AUDIO_TIMING_MARKER: _compact_audio_timing(item, parsed.get(AUDIO_TIMING_MARKER, "")),
         TAP_SYNC_MARKER: _compact_tap_sync(item, parsed.get(TAP_SYNC_MARKER, "")),
@@ -367,6 +397,15 @@ def compact_item_prompt(
         compacted = _render_prompt(prefix, sections)
 
     if len(compacted) > max_chars:
+        overflow = len(compacted) - max_chars
+        scene_budget = max(420, len(sections[SCENE_DESCRIPTION_MARKER]) - overflow - 80)
+        sections[SCENE_DESCRIPTION_MARKER] = _truncate_at_boundary(
+            sections[SCENE_DESCRIPTION_MARKER],
+            scene_budget,
+        )
+        compacted = _render_prompt(prefix, sections)
+
+    if len(compacted) > max_chars:
         raise ValueError(
             f"Unable to compact final LTX prompt below {max_chars} characters; got {len(compacted)}"
         )
@@ -391,8 +430,9 @@ def compact_item_prompt(
         "hard_limit_chars": int(max_chars),
         "removed_negative_terms": removed_terms,
         "preserved_markers": [marker for marker in MARKERS if marker in compacted],
-        "policy": "compact_after_ollama_asmo_subject_lock_and_tap_sync",
+        "policy": "compact_after_ollama_vision_asmo_subject_lock_and_tap_sync",
         "foreground_motion_onset_enforced": True,
+        "scene_description_preserved": SCENE_DESCRIPTION_MARKER in compacted,
     }
 
     expansion = patched.get("filename_hint_expansion")
@@ -432,7 +472,8 @@ def compact_plan_prompts(
         "hard_limit_chars": int(max_chars),
         "max_before_chars": max(before_lengths) if before_lengths else 0,
         "max_after_chars": max(after_lengths) if after_lengths else 0,
-        "policy": "compact_after_all_prompt_layers",
+        "policy": "compact_after_all_prompt_layers_including_ollama_vision",
         "foreground_motion_onset_enforced": True,
+        "scene_description_preserved": True,
     }
     return patched
