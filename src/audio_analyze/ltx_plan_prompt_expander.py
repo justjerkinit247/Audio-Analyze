@@ -1,21 +1,22 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Callable
 import json
 import re
+from pathlib import Path
+from typing import Any, Callable
 
 try:
     from .ltx_filename_hint_expander import (
         DEFAULT_OLLAMA_MODEL,
-        NEGATIVE_MARKER,
         DEFAULT_PROVIDER,
         MOTION_MARKER,
+        NEGATIVE_MARKER,
         clean_scene_hint,
         expand_scene_hint,
         render_combined_ltx_text,
     )
     from .ltx_seed_image_analyzer import (
+        DEFAULT_OLLAMA_VISION_MODEL,
         SEED_IMAGE_DESCRIPTION_MARKER,
         analyze_seed_image,
         failed_seed_image_analysis,
@@ -25,14 +26,15 @@ try:
 except ImportError:
     from ltx_filename_hint_expander import (
         DEFAULT_OLLAMA_MODEL,
-        NEGATIVE_MARKER,
         DEFAULT_PROVIDER,
         MOTION_MARKER,
+        NEGATIVE_MARKER,
         clean_scene_hint,
         expand_scene_hint,
         render_combined_ltx_text,
     )
     from ltx_seed_image_analyzer import (
+        DEFAULT_OLLAMA_VISION_MODEL,
         SEED_IMAGE_DESCRIPTION_MARKER,
         analyze_seed_image,
         failed_seed_image_analysis,
@@ -47,8 +49,11 @@ SUBJECT_LOCK_MARKER = "[SUBJECT_LOCK]"
 
 FEMALE_TOKENS = {"woman", "female", "girl", "lady"}
 MALE_TOKENS = {"man", "male", "guy", "gentleman"}
-PAIR_TOKENS = {"duet", "pair", "couple", "partners", "partner", "two", "both"}
+PAIR_TOKENS = {"duet", "pair", "couple", "partners", "partner"}
 GROUP_TOKENS = {"choir", "group", "ensemble", "crowd", "team", "dancers", "performers"}
+SUBJECT_NOUN_PATTERN = (
+    r"people|persons|subjects|performers|dancers|adults|figures|women|men|girls|boys"
+)
 
 
 def read_json(path: str | Path) -> dict[str, Any]:
@@ -82,17 +87,58 @@ def _scene_tokens(value: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", str(value or "").lower()))
 
 
+def _explicit_subject_pair(value: str) -> bool:
+    text = re.sub(r"[_-]+", " ", str(value or "").lower())
+    direct_pair = re.search(
+        rf"\b(?:two|both|a pair of|a couple of)\s+(?:visible\s+)?(?:{SUBJECT_NOUN_PATTERN})\b",
+        text,
+    )
+    mixed_pair = (
+        re.search(r"\b(?:one|a)\s+(?:woman|female|girl|lady)\b", text)
+        and re.search(r"\b(?:one|a)\s+(?:man|male|guy|gentleman)\b", text)
+    )
+    return bool(direct_pair or mixed_pair or re.search(r"\bforeground pair\b", text))
+
+
+def _explicit_subject_group(value: str) -> bool:
+    text = re.sub(r"[_-]+", " ", str(value or "").lower())
+    return bool(
+        re.search(
+            rf"\b(?:group|ensemble|crowd|team)\s+of\s+(?:{SUBJECT_NOUN_PATTERN})\b",
+            text,
+        )
+        or re.search(
+            rf"\b(?:several|multiple|three|four|five|six|seven|eight|nine|ten|\d+)\s+(?:{SUBJECT_NOUN_PATTERN})\b",
+            text,
+        )
+    )
+
+
 def build_subject_count_policy(
     filename: str,
     scene_hint: str,
     scene_description: str = "",
 ) -> dict[str, Any]:
-    tokens = _scene_tokens(f"{filename} {scene_hint} {scene_description}")
-    has_female = bool(tokens & FEMALE_TOKENS)
-    has_male = bool(tokens & MALE_TOKENS)
-    has_pair = bool(tokens & PAIR_TOKENS) or (has_female and has_male)
-    has_choir = "choir" in tokens
-    has_group = bool(tokens & GROUP_TOKENS)
+    authoritative_text = f"{filename} {scene_hint}"
+    all_text = f"{authoritative_text} {scene_description}"
+    authoritative_tokens = _scene_tokens(authoritative_text)
+    all_tokens = _scene_tokens(all_text)
+
+    has_female = bool(all_tokens & FEMALE_TOKENS)
+    has_male = bool(all_tokens & MALE_TOKENS)
+    has_pair = (
+        bool(authoritative_tokens & PAIR_TOKENS)
+        or _explicit_subject_pair(authoritative_text)
+        or _explicit_subject_pair(scene_description)
+        or (has_female and has_male)
+    )
+    has_choir = "choir" in all_tokens
+    has_group = (
+        bool(authoritative_tokens & GROUP_TOKENS)
+        or has_choir
+        or _explicit_subject_group(authoritative_text)
+        or _explicit_subject_group(scene_description)
+    )
     multiple_subjects = has_pair or has_group
 
     requirements = [
@@ -361,17 +407,29 @@ def build_scene_prompt_from_expansion(
 def _run_seed_image_analysis(
     item: dict[str, Any],
     *,
-    model: str | None,
+    vision_model: str | None,
     image_analyzer: Callable[..., dict[str, Any]],
     strict: bool,
 ) -> dict[str, Any]:
     image_path = _seed_path(item)
     try:
-        return image_analyzer(image_path, model=model)
+        return image_analyzer(image_path, model=vision_model)
     except Exception as exc:
         if strict:
             raise
-        return failed_seed_image_analysis(image_path, exc, model=model)
+        return failed_seed_image_analysis(image_path, exc, model=vision_model)
+
+
+def _disabled_seed_image_analysis(vision_model: str | None) -> dict[str, Any]:
+    return {
+        "status": "disabled",
+        "provider": "ollama",
+        "model": vision_model or DEFAULT_OLLAMA_VISION_MODEL,
+        "description_format": "natural_language",
+        "description": "",
+        "error": "seed-image analysis was disabled for this run",
+        "observation_policy": "visible_details_only_no_motion_invention",
+    }
 
 
 def expand_plan_data(
@@ -380,15 +438,19 @@ def expand_plan_data(
     model: str | None = DEFAULT_OLLAMA_MODEL,
     expander: Callable[..., dict[str, Any]] | None = None,
     image_analyzer: Callable[..., dict[str, Any]] | None = None,
-    analyze_images: bool = True,
+    analyze_images: bool | None = None,
     strict_image_analysis: bool = False,
+    vision_model: str | None = None,
 ) -> dict[str, Any]:
     expander = expander or expand_scene_hint
     image_analyzer = image_analyzer or analyze_seed_image
+    effective_analyze_images = provider != "template" if analyze_images is None else bool(analyze_images)
+
     patched = dict(plan)
     results = []
     expansion_count = 0
     vision_complete_count = 0
+    actual_vision_models: set[str] = set()
 
     for raw_item in plan.get("results", []):
         item = dict(raw_item)
@@ -397,24 +459,20 @@ def expand_plan_data(
         if not scene_hint:
             raise ValueError(f"Seed image filename produced an empty Ollama prompt hint: {filename}")
 
-        if analyze_images:
+        if effective_analyze_images:
             seed_analysis = _run_seed_image_analysis(
                 item,
-                model=model,
+                vision_model=vision_model,
                 image_analyzer=image_analyzer,
                 strict=strict_image_analysis,
             )
         else:
-            seed_analysis = {
-                "status": "disabled",
-                "provider": "ollama",
-                "model": model,
-                "description_format": "natural_language",
-                "description": "",
-                "error": "seed-image analysis was disabled for this run",
-            }
+            seed_analysis = _disabled_seed_image_analysis(vision_model)
+
         if seed_analysis.get("status") == "complete":
             vision_complete_count += 1
+        if seed_analysis.get("model"):
+            actual_vision_models.add(str(seed_analysis["model"]))
 
         raw_expansion = expander(
             scene_hint,
@@ -471,9 +529,22 @@ def expand_plan_data(
         "transport_mode": "audio_and_image_to_video",
     }
     patched["seed_image_analysis"] = {
-        "status": "applied" if vision_complete_count == expansion_count else "partial",
+        "status": (
+            "disabled"
+            if not effective_analyze_images
+            else "applied"
+            if vision_complete_count == expansion_count
+            else "partial"
+        ),
+        "enabled": effective_analyze_images,
         "provider": "ollama",
-        "model": model,
+        "model": (
+            next(iter(actual_vision_models))
+            if len(actual_vision_models) == 1
+            else sorted(actual_vision_models)
+            if actual_vision_models
+            else vision_model or DEFAULT_OLLAMA_VISION_MODEL
+        ),
         "description_format": "natural_language",
         "scene_count": expansion_count,
         "completed_scene_count": vision_complete_count,
@@ -494,8 +565,9 @@ def expand_plan_file(
     provider: str = DEFAULT_PLAN_EXPANSION_PROVIDER,
     model: str | None = DEFAULT_OLLAMA_MODEL,
     *,
-    analyze_images: bool = True,
+    analyze_images: bool | None = None,
     strict_image_analysis: bool = False,
+    vision_model: str | None = None,
 ) -> dict[str, Any]:
     plan = read_json(plan_json)
     patched = expand_plan_data(
@@ -504,6 +576,7 @@ def expand_plan_file(
         model=model,
         analyze_images=analyze_images,
         strict_image_analysis=strict_image_analysis,
+        vision_model=vision_model,
     )
     write_json(output_json or plan_json, patched)
     return patched
@@ -523,17 +596,26 @@ def main() -> None:
         choices=["template", "openai", "ollama"],
     )
     parser.add_argument("--model", default=DEFAULT_OLLAMA_MODEL)
+    parser.add_argument("--vision-model", default=None)
     parser.add_argument("--skip-image-analysis", action="store_true")
+    parser.add_argument("--force-image-analysis", action="store_true")
     parser.add_argument("--strict-image-analysis", action="store_true")
     args = parser.parse_args()
+
+    analyze_images: bool | None = None
+    if args.skip_image_analysis:
+        analyze_images = False
+    elif args.force_image_analysis:
+        analyze_images = True
 
     patched = expand_plan_file(
         args.plan_json,
         output_json=args.output,
         provider=args.provider,
         model=args.model,
-        analyze_images=not args.skip_image_analysis,
+        analyze_images=analyze_images,
         strict_image_analysis=args.strict_image_analysis,
+        vision_model=args.vision_model,
     )
     print("Seed-image analysis and filename-hint prompt expansion applied.")
     print(f"Scenes: {patched.get('filename_hint_expansion', {}).get('scene_count')}")
