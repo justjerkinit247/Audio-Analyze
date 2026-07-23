@@ -144,8 +144,18 @@ jobs:
 
           scene = results[0]
           prompt = str(scene.get("prompt_text") or "")
-          for marker in ("[SUBJECT_LOCK]", "[AUDIO_TIMING]", "[TAP_SYNC]", "[MOTION_PROMPT]", "[NEGATIVE_PROMPT]"):
-              assert marker in prompt, f"Active prompt is missing {marker}"
+          markers = (
+              "[SUBJECT_LOCK]",
+              "[SEED_IMAGE_DESCRIPTION]",
+              "[AUDIO_TIMING]",
+              "[TAP_SYNC]",
+              "[MOTION_PROMPT]",
+              "[NEGATIVE_PROMPT]",
+          )
+          for marker in markers:
+              assert prompt.count(marker) == 1, f"Active prompt must contain {marker} exactly once"
+          positions = [prompt.index(marker) for marker in markers]
+          assert positions == sorted(positions), "Active prompt markers are out of order"
 
           tap_summary = plan.get("tap_sync") or {}
           scene_tap = scene.get("tap_sync") or {}
@@ -156,12 +166,15 @@ jobs:
               f"Tap detector fell back to the beat grid: {scene_tap.get('primary_sync_source')}"
           )
           assert scene_tap.get("tap_accent_times_seconds"), "Scene has no selected tap accents"
-          assert "overrides any generic kick" in prompt, "Tap policy does not override generic kick wording"
+          assert "first tap is an accent, not the start signal" in prompt, "First tap is incorrectly treated as motion onset"
+          assert "bass-only boom hits" in prompt, "Tap policy does not reject bass-only boom triggers"
+
           assert report.get("beat_alignment_enabled") is True, "Beat alignment is not enabled in the report"
           assert report.get("tap_sync_policy") == "tap_not_boom", "Report tap-sync policy is missing"
           assert report.get("tap_accent_sync_requested") is True, "Tap-accent sync was not requested"
           assert report.get("status") == "complete", f"Unexpected report status: {report.get('status')}"
           assert report.get("live") is False, "Validation unexpectedly performed a live run"
+
           assert scene.get("prompt_build_method") == "seed_filename_ollama_expansion_with_audio_timing_and_subject_lock", (
               f"Unexpected prompt build method: {scene.get('prompt_build_method')}"
           )
@@ -173,13 +186,21 @@ jobs:
               f"Wrong seed filename prompt source: {scene.get('seed_filename_used_for_prompt_hint')}"
           )
           assert prompt.startswith("Audio-and-image-to-video continuation synchronized to the supplied audio"), (
-              "Active prompt still uses the old image-to-video header"
+              "Deterministic template fallback header changed unexpectedly"
           )
           assert f"Seed image filename used as the Ollama prompt hint: {expected_seed}." in prompt
           assert "The seed image is authoritative for subject count and body layout." in prompt
+          assert scene.get("seed_image_analysis", {}).get("status") == "disabled", (
+              "Template-provider CI run unexpectedly invoked image analysis"
+          )
+          assert scene.get("prompt_text_is_exact_ltx_payload") is True
+          assert scene.get("exact_prompt_sent_to_ltx") == prompt
+          budget = scene.get("prompt_budget") or {}
+          assert budget.get("policy_version") == "deterministic_fallback_v4"
+          assert budget.get("seed_analysis_summary_model_used") is False
           assert len(prompt) <= 5000, f"Prompt exceeds hard limit: {len(prompt)}"
 
-          print("Offline tap-not-boom audio-and-image pipeline validation passed")
+          print("Offline deterministic tap-not-boom pipeline validation passed")
           print(f"Selected tap times: {scene_tap.get('tap_accent_times_seconds')}")
           print(f"Seed filename prompt source: {scene.get('seed_filename_used_for_prompt_hint')}")
           print(f"Plan: {plan_path}")

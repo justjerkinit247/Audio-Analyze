@@ -5,7 +5,17 @@ from audio_analyze.ltx_plan_prompt_expander import (
     build_subject_count_policy,
     expand_plan_data,
 )
-from audio_analyze.ltx_seed_image_analyzer import SEED_IMAGE_DESCRIPTION_MARKER
+from audio_analyze.ltx_seed_image_analyzer import (
+    RESERVED_PROMPT_MARKERS,
+    SEED_IMAGE_DESCRIPTION_MARKER,
+    VISION_ANALYSIS_MODE,
+    VISION_SYSTEM_PROMPT,
+    VISION_USER_PROMPT,
+    _vision_config,
+    analyze_seed_image,
+    escape_reserved_prompt_markers,
+    render_seed_image_description_block,
+)
 
 
 class FakeResponse:
@@ -27,6 +37,23 @@ class FakeSession:
     def post(self, url, json, timeout):
         self.posts.append({"url": url, "json": json, "timeout": timeout})
         return FakeResponse(self.payload)
+
+
+class FakeVisionClient:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+        self.text_calls = []
+
+    def chat_text_with_images(self, system, user, image_paths):
+        self.calls.append(
+            {"system": system, "user": user, "image_paths": list(image_paths)}
+        )
+        return self.response
+
+    def chat_text(self, system, user):
+        self.text_calls.append({"system": system, "user": user})
+        raise AssertionError("Native image analysis must not make a summary-selection call")
 
 
 def sample_plan():
@@ -102,7 +129,6 @@ def test_subject_count_does_not_treat_two_props_as_two_people():
         "woman in studio",
         "One woman stands between two chairs with two windows behind her.",
     )
-
     assert policy["has_pair"] is False
     assert policy["multiple_subjects"] is False
     assert "missing foreground partner" not in policy["negative_terms"]
@@ -114,7 +140,6 @@ def test_subject_count_accepts_explicit_two_subject_description():
         "studio",
         "Two visible dancers stand together in the foreground.",
     )
-
     assert policy["has_pair"] is True
     assert policy["multiple_subjects"] is True
 
@@ -130,7 +155,6 @@ def test_template_provider_disables_vision_by_default():
         expander=fake_expander,
         image_analyzer=forbidden_analyzer,
     )
-
     assert patched["seed_image_analysis"]["status"] == "disabled"
     assert patched["seed_image_analysis"]["enabled"] is False
     assert patched["results"][0]["seed_image_analysis"]["status"] == "disabled"
@@ -158,7 +182,6 @@ def test_template_provider_can_explicitly_force_vision_analysis():
         analyze_images=True,
         vision_model="gemma3:4b",
     )
-
     assert calls == [("inputs/ltx_seed_images/scene_01_subject.png", "gemma3:4b")]
     assert patched["seed_image_analysis"]["status"] == "applied"
 
@@ -185,7 +208,92 @@ def test_vision_model_is_separate_from_expansion_model():
         expander=fake_expander,
         image_analyzer=recording_analyzer,
     )
-
     assert calls["model"] == "gemma3:4b"
     assert patched["results"][0]["prompt_expansion_model"] == "gpt-4o"
     assert patched["results"][0]["seed_image_analysis"]["model"] == "gemma3:4b"
+
+
+def test_freeform_prompts_remove_checklist_and_word_limit():
+    combined = f"{VISION_SYSTEM_PROMPT}\n{VISION_USER_PROMPT}".lower()
+    assert "no required checklist" in combined
+    assert "word limit" in combined
+    assert "60 and 140" not in combined
+    assert "return your complete native analysis" in combined
+
+
+def test_native_analysis_is_preserved_without_reformatting(tmp_path):
+    image = tmp_path / "seed.png"
+    image.write_bytes(b"image-bytes")
+    native_response = (
+        "Visual Analysis\n\n"
+        "- Camera: low-angle medium-wide framing.\n"
+        "- Lighting: warm stained-glass highlights.\n\n"
+        "The image suggests layered depth and complex implied motion."
+    )
+    client = FakeVisionClient(f"\n{native_response}\n")
+
+    result = analyze_seed_image(image, model="gemma3:4b", client=client)
+
+    assert result["description"] == native_response
+    assert result["analysis_mode"] == VISION_ANALYSIS_MODE
+    assert result["observation_policy"] == "freeform_native_visual_analysis"
+    assert result["description_char_count"] == len(native_response)
+    assert result["description_line_count"] == len(native_response.splitlines())
+    assert result["prompt_context"] == native_response
+    assert result["prompt_context_selection"] == "full_native_analysis_unmodified"
+    assert client.calls[0]["system"] == VISION_SYSTEM_PROMPT
+    assert client.calls[0]["user"] == VISION_USER_PROMPT
+    assert client.text_calls == []
+
+
+def test_long_native_analysis_is_not_resummarized(tmp_path):
+    image = tmp_path / "seed.png"
+    image.write_bytes(b"image-bytes")
+    native_response = (
+        "Complete native analysis paragraph with detailed camera, lighting, wardrobe, "
+        "architecture, pose, composition, texture, atmosphere, and implied action. "
+        * 30
+    )
+    client = FakeVisionClient(native_response)
+
+    result = analyze_seed_image(image, model="gemma3:4b", client=client)
+    prompt_block = render_seed_image_description_block(result)
+    expected = native_response.strip()
+
+    assert result["description"] == expected
+    assert result["prompt_context"] == expected
+    assert result["prompt_context_selection"] == "full_native_analysis_unmodified"
+    assert expected in prompt_block
+    assert client.text_calls == []
+
+
+def test_reserved_markers_are_inert_only_in_intermediate_rendering(tmp_path):
+    image = tmp_path / "seed.png"
+    image.write_bytes(b"image-bytes")
+    native_response = (
+        "Gemma native analysis includes literal pipeline-looking text: "
+        + " ".join(RESERVED_PROMPT_MARKERS)
+    )
+    client = FakeVisionClient(native_response)
+
+    result = analyze_seed_image(image, model="gemma3:4b", client=client)
+    prompt_block = render_seed_image_description_block(result)
+
+    assert result["description"] == native_response
+    assert result["prompt_context"] == native_response
+    for marker in RESERVED_PROMPT_MARKERS:
+        assert marker in result["description"]
+        if marker == SEED_IMAGE_DESCRIPTION_MARKER:
+            assert prompt_block.count(marker) == 1
+        else:
+            assert marker not in prompt_block
+        assert f"［{marker[1:-1]}］" in prompt_block
+    assert escape_reserved_prompt_markers(native_response) in prompt_block
+
+
+def test_vision_config_allows_longer_native_output(monkeypatch):
+    monkeypatch.delenv("OLLAMA_VISION_NUM_PREDICT", raising=False)
+    monkeypatch.delenv("OLLAMA_VISION_TIMEOUT_SECONDS", raising=False)
+    config = _vision_config("gemma3:4b")
+    assert config.num_predict == 2048
+    assert config.timeout_seconds >= 600

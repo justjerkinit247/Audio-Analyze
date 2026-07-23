@@ -3,21 +3,34 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+import os
 import re
 
+try:
+    from .ltx_gemma_prompt_synthesizer import (
+        AUDIO_TIMING_MARKER,
+        MOTION_MARKER,
+        NEGATIVE_MARKER,
+        SEED_IMAGE_DESCRIPTION_MARKER,
+        SUBJECT_LOCK_MARKER,
+        TAP_SYNC_MARKER,
+        REQUIRED_MARKERS,
+        synthesize_final_ltx_prompt,
+    )
+except ImportError:
+    from ltx_gemma_prompt_synthesizer import (
+        AUDIO_TIMING_MARKER,
+        MOTION_MARKER,
+        NEGATIVE_MARKER,
+        SEED_IMAGE_DESCRIPTION_MARKER,
+        SUBJECT_LOCK_MARKER,
+        TAP_SYNC_MARKER,
+        REQUIRED_MARKERS,
+        synthesize_final_ltx_prompt,
+    )
 
-SUBJECT_LOCK_MARKER = "[SUBJECT_LOCK]"
-AUDIO_TIMING_MARKER = "[AUDIO_TIMING]"
-TAP_SYNC_MARKER = "[TAP_SYNC]"
-MOTION_MARKER = "[MOTION_PROMPT]"
-NEGATIVE_MARKER = "[NEGATIVE_PROMPT]"
-MARKERS = [
-    SUBJECT_LOCK_MARKER,
-    AUDIO_TIMING_MARKER,
-    TAP_SYNC_MARKER,
-    MOTION_MARKER,
-    NEGATIVE_MARKER,
-]
+
+MARKERS = list(REQUIRED_MARKERS)
 DEFAULT_MAX_CHARS = 5000
 DEFAULT_TARGET_CHARS = 4800
 FOREGROUND_ONSET_DEADLINE_SECONDS = 0.10
@@ -83,7 +96,7 @@ def _format_float(value: Any, digits: int = 2) -> str:
 def _split_prompt(prompt_text: str) -> tuple[str, dict[str, str]]:
     text = str(prompt_text or "")
     pattern = re.compile(
-        r"(?m)^\s*(\[SUBJECT_LOCK\]|\[AUDIO_TIMING\]|\[TAP_SYNC\]|\[MOTION_PROMPT\]|\[NEGATIVE_PROMPT\])\s*$"
+        rf"(?m)^\s*({'|'.join(re.escape(marker) for marker in MARKERS)})\s*$"
     )
     matches = list(pattern.finditer(text))
     if not matches:
@@ -92,21 +105,41 @@ def _split_prompt(prompt_text: str) -> tuple[str, dict[str, str]]:
     prefix = _clean_inline(text[: matches[0].start()])
     sections: dict[str, str] = {}
     for index, match in enumerate(matches):
-        marker = match.group(1)
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        sections[marker] = _clean_inline(text[start:end])
+        sections[match.group(1)] = _clean_inline(text[start:end])
     return prefix, sections
 
 
 def _render_prompt(prefix: str, sections: dict[str, str]) -> str:
     blocks: list[str] = []
     if prefix:
-        blocks.append(prefix)
+        blocks.append(prefix.strip())
     for marker in MARKERS:
         if marker in sections:
             blocks.append(f"{marker}\n{sections[marker].strip()}")
     return "\n\n".join(blocks).strip() + "\n"
+
+
+def _truncate_at_boundary(text: str, limit: int) -> str:
+    cleaned = _clean_inline(text)
+    if limit <= 0:
+        return ""
+    if len(cleaned) <= limit:
+        return cleaned
+    candidate = cleaned[: max(1, limit - 1)].rstrip()
+    boundary = max(
+        candidate.rfind(". "),
+        candidate.rfind("; "),
+        candidate.rfind(", "),
+    )
+    if boundary >= int(limit * 0.55):
+        candidate = candidate[: boundary + 1].rstrip()
+    else:
+        word_boundary = candidate.rfind(" ")
+        if word_boundary > 0:
+            candidate = candidate[:word_boundary]
+    return candidate.rstrip(" ,;:") + "."
 
 
 def _compact_prefix(item: dict[str, Any]) -> str:
@@ -116,9 +149,9 @@ def _compact_prefix(item: dict[str, Any]) -> str:
     )
     return (
         "Audio-and-image-to-video continuation synchronized to the supplied audio. "
-        "Use audio as the timing source and the seed image as authoritative for subject count, identity, pose family, body layout, framing, lighting, and background. "
-        f"Seed image filename used as the Ollama prompt hint: {filename}. "
-        "Preserve the filename-directed scene and visible seed composition; do not import unrelated prior-project assumptions."
+        "Use audio as the timing source and the seed image as authoritative for subject "
+        "count, identity, pose family, body layout, framing, lighting, and background. "
+        f"Seed image filename used as the Ollama prompt hint: {filename}."
     )
 
 
@@ -157,9 +190,10 @@ def _compact_audio_timing(item: dict[str, Any], existing: str) -> str:
     energy = _clean_inline(timing.get("energy_profile") or "rhythm-aware")
     pacing = _clean_inline(timing.get("edit_pacing") or "controlled")
     return (
-        f"Scene {scene_index}: {start}s to {end}s, duration {duration}s, tempo {tempo} BPM, beat alignment {alignment}. "
-        "Keep visible movement and major action changes synchronized to this audio window and its detected rhythmic feel. "
-        f"Energy/pacing: {energy}, {pacing}. Keep camera movement stable and preserve the seed lighting."
+        f"Scene {scene_index}: {start}s to {end}s, duration {duration}s, tempo "
+        f"{tempo} BPM, beat alignment {alignment}. Keep visible movement and major "
+        "action changes synchronized to this audio window. "
+        f"Energy/pacing: {energy}, {pacing}."
     )
 
 
@@ -185,78 +219,43 @@ def _foreground_scope(item: dict[str, Any]) -> str:
     return "the main foreground subject"
 
 
-def _background_priority_text(item: dict[str, Any]) -> str:
-    policy = item.get("subject_count_policy") or {}
-    if policy.get("has_choir"):
-        return (
-            "For the first 0.50 seconds, choir hands and other background motion remain subordinate and cannot be the only moving region. "
-            "After foreground motion is clearly established, the choir may add only subtle claps and sway."
-        )
-    if policy.get("has_group"):
-        return (
-            "For the first 0.50 seconds, background performers remain subordinate and cannot be the only moving region. "
-            "Background motion may increase only after the main foreground motion is clearly established."
-        )
-    return "Environmental or background motion cannot substitute for immediate motion by the main foreground subject."
-
-
 def _compact_tap_sync(item: dict[str, Any], existing: str) -> str:
     targets = _target_text(item, existing)
-    profile = item.get("tap_motion_profile") or (item.get("tap_sync") or {}).get("motion_profile")
+    profile = item.get("tap_motion_profile") or (item.get("tap_sync") or {}).get(
+        "motion_profile"
+    )
     scope = _foreground_scope(item)
-    background_rule = _background_priority_text(item)
 
     onset = (
-        f"FOREGROUND MOTION ONSET: {scope} begin visible motion on frame 1 and visibly depart the seed pose by 0.10 seconds. "
-        "The first listed tap is an accent target, not the start signal; do not wait for it. "
-        "Maintain continuous low-amplitude foreground motion from 0.00 through 0.50 seconds and then throughout the clip. "
-        f"{background_rule}"
+        f"{scope} begin visible motion on frame 1 and depart the seed pose by 0.10 "
+        "seconds. The first tap is an accent, not the start signal. "
     )
 
     if profile == "localized_glute_pulse":
-        partner_rule = ""
-        if (item.get("subject_count_policy") or {}).get("has_pair"):
-            partner_rule = (
-                "By 0.10 seconds, the lead dancer's pelvis and glutes are visibly displaced from the seed pose and the partner has already begun a restrained shoulder-and-chest groove. "
-            )
         return (
-            f"Primary tap-accent times inside this clip: {targets}. "
-            f"{onset} {partner_rule}"
-            "At each listed clap, snare, hi-hat, or sharp tap accent, perform one compact localized twerk pulse: a brief glute-cheek contraction, small backward pelvis pop, and controlled recoil. "
-            "Alternate cheek emphasis only when physically natural. Both feet remain planted; heels stay down, knees bent, the same squat pose is maintained, and head, torso, and overall body height remain nearly constant. "
-            "Maintain visible pelvic micro-motion between taps so the foreground never freezes. "
-            "Do not convert the accents into jumping, hopping, standing up, repeated squats, whole-body bouncing, vertical pumping, or feet leaving the floor. "
-            "Do not use kick-drum or bass-only hits as major movement triggers. This TAP_SYNC rule overrides any generic kick, full-beat, jumping, bouncing, full-body, vertical, delayed-start, or background-only motion wording elsewhere in the prompt."
+            f"Primary tap-accent times inside this clip: {targets}. {onset}"
+            "At each clap, snare, hi-hat, or sharp tap accent, perform one compact "
+            "localized twerk pulse: a brief glute-cheek contraction, small backward "
+            "pelvis pop, and controlled recoil. Both feet remain planted; heels stay "
+            "down, knees bent, and body height remains nearly constant. Maintain "
+            "pelvic micro-motion between taps. Do not convert the accents into jumping, "
+            "hopping, standing up, repeated squats, whole-body bouncing, vertical "
+            "pumping, or feet leaving the floor. Ignore bass-only boom hits."
         )
 
     return (
-        f"Primary tap-accent times inside this clip: {targets}. "
-        f"{onset} "
-        "Use listed clap, snare, hi-hat, and sharp high-frequency accents as controlled visible action triggers. "
-        "Do not use kick-drum or bass-only hits as major movement triggers; maintain coherent foreground motion between accents. "
-        "This TAP_SYNC rule overrides any generic kick, full-beat, delayed-start, or background-only motion wording elsewhere in the prompt."
+        f"Primary tap-accent times inside this clip: {targets}. {onset}"
+        "Use clap, snare, hi-hat, and sharp high-frequency accents as controlled "
+        "visible action triggers. Ignore bass-only boom hits and maintain coherent "
+        "foreground motion between accents."
     )
-
-
-def _truncate_at_boundary(text: str, limit: int) -> str:
-    cleaned = _clean_inline(text)
-    if len(cleaned) <= limit:
-        return cleaned
-    candidate = cleaned[: max(1, limit - 1)].rstrip()
-    boundary = max(candidate.rfind(". "), candidate.rfind("; "), candidate.rfind(", "))
-    if boundary >= int(limit * 0.55):
-        candidate = candidate[: boundary + 1].rstrip()
-    else:
-        word_boundary = candidate.rfind(" ")
-        if word_boundary > 0:
-            candidate = candidate[:word_boundary]
-    return candidate.rstrip(" ,;:") + "."
 
 
 def _compact_motion(item: dict[str, Any], existing: str, limit: int) -> str:
     expansion = item.get("filename_hint_expansion") or {}
     source = _clean_inline(expansion.get("ltx_motion_prompt") or existing)
-    return _truncate_at_boundary(source, max(240, limit))
+    fallback = "Maintain continuous grounded motion and stable camera movement."
+    return _truncate_at_boundary(source or fallback, max(240, limit))
 
 
 def _split_negative_terms(text: str) -> list[str]:
@@ -281,7 +280,11 @@ def _negative_terms(item: dict[str, Any], existing: str) -> list[str]:
     return unique
 
 
-def _compact_negative(item: dict[str, Any], existing: str, limit: int) -> tuple[str, list[str]]:
+def _compact_negative(
+    item: dict[str, Any],
+    existing: str,
+    limit: int,
+) -> tuple[str, list[str]]:
     terms = _negative_terms(item, existing)
     by_key = {term.lower(): term for term in terms}
     prioritized: list[str] = []
@@ -309,25 +312,110 @@ def _compact_negative(item: dict[str, Any], existing: str, limit: int) -> tuple[
     return ", ".join(kept), removed
 
 
-def compact_item_prompt(
+def _freeform_gemma_analysis(item: dict[str, Any]) -> bool:
+    analysis = item.get("seed_image_analysis") or {}
+    if os.environ.get("OLLAMA_FINAL_PROMPT_SYNTHESIS", "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return False
+    return (
+        analysis.get("status") == "complete"
+        and bool(str(analysis.get("description") or "").strip())
+        and analysis.get("analysis_mode") == "freeform_native"
+    )
+
+
+def _apply_gemma_synthesis(
     item: dict[str, Any],
     *,
-    max_chars: int = DEFAULT_MAX_CHARS,
-    target_chars: int = DEFAULT_TARGET_CHARS,
+    max_chars: int,
+) -> dict[str, Any]:
+    patched = deepcopy(item)
+    synthesis = synthesize_final_ltx_prompt(
+        patched,
+        max_chars=max_chars,
+        target_min=min(4700, max_chars - 250),
+        target_max=min(4980, max_chars),
+    )
+    final_prompt = synthesis["final_prompt"]
+    analysis = deepcopy(patched.get("seed_image_analysis") or {})
+    analysis["prompt_context"] = final_prompt
+    analysis["prompt_context_char_count"] = len(final_prompt)
+    analysis["prompt_context_selection"] = (
+        "gemma_full_native_analysis_to_final_ltx_prompt"
+    )
+    patched["seed_image_analysis"] = analysis
+    patched["gemma_final_prompt_synthesis"] = synthesis
+    patched["prompt_text_before_gemma_final_synthesis"] = str(
+        item.get("prompt_text") or ""
+    )
+    patched["prompt_text"] = final_prompt
+    patched["exact_prompt_sent_to_ltx"] = final_prompt
+    patched["prompt_text_is_exact_ltx_payload"] = True
+    patched["prompt_text_chars"] = len(final_prompt)
+    patched["prompt_budget"] = {
+        "status": "gemma_synthesized",
+        "before_chars": len(str(item.get("prompt_text") or "")),
+        "after_chars": len(final_prompt),
+        "target_chars": min(4980, max_chars),
+        "hard_limit_chars": max_chars,
+        "preserved_markers": [
+            marker for marker in REQUIRED_MARKERS if marker in final_prompt
+        ],
+        "policy": "gemma_full_native_analysis_final_prompt_synthesis",
+        "policy_version": "gemma_final_ltx_prompt_v1",
+        "seed_analysis_native_chars": synthesis["source_native_analysis_chars"],
+        "seed_analysis_prompt_chars": synthesis["seed_description_char_count"],
+        "seed_analysis_summary_model_used": True,
+        "final_prompt_synthesis_model": synthesis["model"],
+        "final_prompt_synthesis_attempts": synthesis["attempt_count"],
+        "final_prompt_validation_passed": synthesis["validation_passed"],
+        "prompt_text_is_exact_ltx_payload": True,
+    }
+    return patched
+
+
+def _deterministic_compact_item(
+    item: dict[str, Any],
+    *,
+    max_chars: int,
+    target_chars: int,
 ) -> dict[str, Any]:
     patched = deepcopy(item)
     original = str(item.get("prompt_text") or "")
     _, parsed = _split_prompt(original)
 
     sections = {
-        SUBJECT_LOCK_MARKER: _compact_subject_lock(item, parsed.get(SUBJECT_LOCK_MARKER, "")),
-        AUDIO_TIMING_MARKER: _compact_audio_timing(item, parsed.get(AUDIO_TIMING_MARKER, "")),
-        TAP_SYNC_MARKER: _compact_tap_sync(item, parsed.get(TAP_SYNC_MARKER, "")),
+        SUBJECT_LOCK_MARKER: _compact_subject_lock(
+            item,
+            parsed.get(SUBJECT_LOCK_MARKER, ""),
+        ),
+        AUDIO_TIMING_MARKER: _compact_audio_timing(
+            item,
+            parsed.get(AUDIO_TIMING_MARKER, ""),
+        ),
+        TAP_SYNC_MARKER: _compact_tap_sync(
+            item,
+            parsed.get(TAP_SYNC_MARKER, ""),
+        ),
         MOTION_MARKER: "",
         NEGATIVE_MARKER: "",
     }
-    prefix = _compact_prefix(item)
 
+    analysis = item.get("seed_image_analysis") or {}
+    seed_description = _clean_inline(
+        analysis.get("description")
+        or analysis.get("prompt_context")
+        or parsed.get(SEED_IMAGE_DESCRIPTION_MARKER)
+        or ""
+    )
+    if seed_description:
+        sections[SEED_IMAGE_DESCRIPTION_MARKER] = seed_description
+
+    prefix = _compact_prefix(item)
     fixed_without_motion_negative = _render_prompt(prefix, sections)
     available = max(700, target_chars - len(fixed_without_motion_negative))
     negative_limit = min(1150, max(720, int(available * 0.46)))
@@ -348,30 +436,43 @@ def compact_item_prompt(
 
     if len(compacted) > target_chars:
         overflow = len(compacted) - target_chars
-        sections[MOTION_MARKER] = _compact_motion(
-            item,
-            sections[MOTION_MARKER],
-            max(300, len(sections[MOTION_MARKER]) - overflow - 80),
-        )
+        if SEED_IMAGE_DESCRIPTION_MARKER in sections:
+            sections[SEED_IMAGE_DESCRIPTION_MARKER] = _truncate_at_boundary(
+                sections[SEED_IMAGE_DESCRIPTION_MARKER],
+                max(
+                    500,
+                    len(sections[SEED_IMAGE_DESCRIPTION_MARKER]) - overflow - 60,
+                ),
+            )
+        else:
+            sections[MOTION_MARKER] = _truncate_at_boundary(
+                sections[MOTION_MARKER],
+                max(300, len(sections[MOTION_MARKER]) - overflow - 60),
+            )
         compacted = _render_prompt(prefix, sections)
 
-    if len(compacted) > target_chars:
-        overflow = len(compacted) - target_chars
-        negative_budget = max(600, len(sections[NEGATIVE_MARKER]) - overflow - 80)
+    if len(compacted) > max_chars:
+        overflow = len(compacted) - max_chars
         sections[NEGATIVE_MARKER], additionally_removed = _compact_negative(
             item,
             sections[NEGATIVE_MARKER],
-            negative_budget,
+            max(500, len(sections[NEGATIVE_MARKER]) - overflow - 60),
         )
         removed_terms.extend(additionally_removed)
         compacted = _render_prompt(prefix, sections)
 
     if len(compacted) > max_chars:
         raise ValueError(
-            f"Unable to compact final LTX prompt below {max_chars} characters; got {len(compacted)}"
+            f"Unable to compact final LTX prompt below {max_chars} characters; "
+            f"got {len(compacted)}"
         )
 
-    onset_metadata = {
+    patched["prompt_text_before_budget_compaction"] = original
+    patched["prompt_text"] = compacted
+    patched["exact_prompt_sent_to_ltx"] = compacted
+    patched["prompt_text_is_exact_ltx_payload"] = True
+    patched["prompt_text_chars"] = len(compacted)
+    patched["foreground_motion_onset"] = {
         "required": True,
         "deadline_seconds": FOREGROUND_ONSET_DEADLINE_SECONDS,
         "priority_window_seconds": FOREGROUND_PRIORITY_WINDOW_SECONDS,
@@ -379,10 +480,6 @@ def compact_item_prompt(
         "background_only_motion_forbidden": True,
         "subject_scope": _foreground_scope(item),
     }
-
-    patched["prompt_text_before_budget_compaction"] = original
-    patched["prompt_text"] = compacted
-    patched["foreground_motion_onset"] = onset_metadata
     patched["prompt_budget"] = {
         "status": "compacted" if len(original) > len(compacted) else "within_budget",
         "before_chars": len(original),
@@ -390,17 +487,43 @@ def compact_item_prompt(
         "target_chars": int(target_chars),
         "hard_limit_chars": int(max_chars),
         "removed_negative_terms": removed_terms,
-        "preserved_markers": [marker for marker in MARKERS if marker in compacted],
+        "preserved_markers": [
+            marker for marker in MARKERS if marker in compacted
+        ],
         "policy": "compact_after_ollama_asmo_subject_lock_and_tap_sync",
+        "policy_version": "deterministic_fallback_v4",
         "foreground_motion_onset_enforced": True,
+        "seed_analysis_summary_model_used": False,
+        "prompt_text_is_exact_ltx_payload": True,
     }
 
     expansion = patched.get("filename_hint_expansion")
     if isinstance(expansion, dict):
-        expansion["negative_prompt_before_budget_compaction"] = expansion.get("negative_prompt")
+        expansion["negative_prompt_before_budget_compaction"] = expansion.get(
+            "negative_prompt"
+        )
         expansion["negative_prompt"] = sections[NEGATIVE_MARKER]
 
     return patched
+
+
+def compact_item_prompt(
+    item: dict[str, Any],
+    *,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    target_chars: int = DEFAULT_TARGET_CHARS,
+) -> dict[str, Any]:
+    hard_limit = max(1, int(max_chars))
+    target = min(hard_limit, max(1, int(target_chars)))
+
+    if _freeform_gemma_analysis(item):
+        return _apply_gemma_synthesis(item, max_chars=hard_limit)
+
+    return _deterministic_compact_item(
+        item,
+        max_chars=hard_limit,
+        target_chars=target,
+    )
 
 
 def compact_plan_prompts(
@@ -413,6 +536,7 @@ def compact_plan_prompts(
     results: list[dict[str, Any]] = []
     before_lengths: list[int] = []
     after_lengths: list[int] = []
+    synthesis_count = 0
 
     for item in plan.get("results", []) or []:
         compacted = compact_item_prompt(
@@ -420,19 +544,24 @@ def compact_plan_prompts(
             max_chars=max_chars,
             target_chars=target_chars,
         )
-        before_lengths.append(int(compacted["prompt_budget"]["before_chars"]))
-        after_lengths.append(int(compacted["prompt_budget"]["after_chars"]))
+        budget = compacted["prompt_budget"]
+        before_lengths.append(int(budget["before_chars"]))
+        after_lengths.append(int(budget["after_chars"]))
+        if budget.get("status") == "gemma_synthesized":
+            synthesis_count += 1
         results.append(compacted)
 
     patched["results"] = results
     patched["prompt_budget"] = {
         "status": "applied",
         "scene_count": len(results),
-        "target_chars": int(target_chars),
+        "target_chars": min(int(target_chars), int(max_chars)),
         "hard_limit_chars": int(max_chars),
         "max_before_chars": max(before_lengths) if before_lengths else 0,
         "max_after_chars": max(after_lengths) if after_lengths else 0,
-        "policy": "compact_after_all_prompt_layers",
+        "gemma_final_prompt_synthesis_scene_count": synthesis_count,
+        "policy": "gemma_synthesis_for_freeform_analysis_else_deterministic_compaction",
+        "policy_version": "gemma_final_ltx_prompt_v1",
         "foreground_motion_onset_enforced": True,
     }
     return patched
