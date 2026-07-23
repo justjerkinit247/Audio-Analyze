@@ -43,15 +43,19 @@ def _item(native):
             "has_choir": True,
             "has_group": True,
             "multiple_subjects": True,
-            "requirements": [
-                "Preserve the female lead dancer, male dance partner, and choir."
+            "negative_terms": [
+                "missing male dancer",
+                "missing female dancer",
+                "missing choir",
             ],
         },
         "audio_timing": {
             "scene_index": 1,
             "start_seconds": 0.0,
             "end_seconds": 8.0,
+            "duration_seconds": 8.0,
             "tempo_bpm": 140.62,
+            "beat_alignment_enabled": True,
         },
         "tap_sync": {
             "primary_sync_targets_relative_seconds": [
@@ -82,7 +86,18 @@ def _item(native):
     }
 
 
-def _valid_final_prompt(native):
+def _bounded_visual(limit):
+    sentence = (
+        "Two foreground performers remain visible in the grand Gothic cathedral, with "
+        "detailed wardrobe, grounded pose, layered choir placement, stained-glass "
+        "architecture, golden volumetric light, deep perspective, reflective flooring, "
+        "balanced framing, rich color contrast, texture, atmosphere, and cinematic style. "
+    )
+    minimum = max(2200, int(limit * 0.70))
+    return (sentence * ((minimum // len(sentence)) + 2))[:minimum]
+
+
+def _valid_legacy_final_prompt(native):
     visual = (
         "Two foreground performers remain fully described inside the cathedral. "
         + native
@@ -102,79 +117,123 @@ def _valid_final_prompt(native):
         f"{NEGATIVE_MARKER}\n"
         "missing male dancer, missing female dancer, missing choir, jumping, extra limbs"
     )
-    if len(prompt) < 4550:
-        addition = " Preserve all visible lighting, framing, architecture, wardrobe, and spatial detail."
-        prompt = prompt.replace(
-            f"\n\n{AUDIO_TIMING_MARKER}",
-            addition * ((4550 - len(prompt)) // len(addition) + 1)
-            + f"\n\n{AUDIO_TIMING_MARKER}",
-        )
     return prompt[:4980]
 
 
-def test_gemma_synthesizes_full_native_analysis_into_final_ltx_prompt():
+def test_gemma_receives_exact_description_budget_before_generation():
     native = _native_analysis()
-    expected = _valid_final_prompt(native)
-    client = FakeClient([expected])
+    probe = FakeClient([""])
 
-    result = synthesize_final_ltx_prompt(
-        _item(native),
-        client=client,
-        max_chars=5000,
+    # First call intentionally uses an empty response so the raised error preserves
+    # the generated request for inspection.
+    try:
+        synthesize_final_ltx_prompt(_item(native), client=probe, max_attempts=1)
+    except ValueError:
+        pass
+
+    assert len(probe.calls) == 1
+    system = probe.calls[0]["system"]
+    user = probe.calls[0]["user"]
+    match = __import__("re").search(r"HARD CHARACTER LIMIT: (\d+)", system)
+    assert match
+    exact_limit = int(match.group(1))
+    assert exact_limit > 1000
+    assert f"HARD MAXIMUM BEFORE YOU BEGIN: {exact_limit}" in user
+    assert native in user
+
+
+def test_bounded_gemma_description_is_inserted_verbatim():
+    native = _native_analysis()
+    probe = FakeClient([""])
+    try:
+        synthesize_final_ltx_prompt(_item(native), client=probe, max_attempts=1)
+    except ValueError:
+        pass
+    exact_limit = int(
+        __import__("re").search(
+            r"HARD CHARACTER LIMIT: (\d+)", probe.calls[0]["system"]
+        ).group(1)
     )
+
+    visual = _bounded_visual(exact_limit)
+    client = FakeClient([visual])
+    result = synthesize_final_ltx_prompt(_item(native), client=client, max_chars=5000)
 
     assert result["status"] == "complete"
-    assert result["final_prompt"] == expected
+    assert result["mode"] == "gemma_bounded_visual_description_python_envelope"
+    assert result["seed_description"] == visual
+    assert result["seed_description_char_count"] == len(visual)
+    assert result["description_char_limit_given_before_generation"] == exact_limit
+    assert result["description_modified_after_generation"] is False
     assert result["final_prompt_char_count"] <= 5000
-    assert result["final_prompt_char_count"] >= 4550
-    assert result["seed_description_char_count"] >= 3600
-    assert result["attempt_count"] == 1
-    assert "native_image_analysis" in client.calls[0]["user"]
-    assert native in client.calls[0]["user"]
+    assert f"{SEED_IMAGE_DESCRIPTION_MARKER}\n{visual}\n\n{AUDIO_TIMING_MARKER}" in result[
+        "final_prompt"
+    ]
+    for marker in (
+        SUBJECT_LOCK_MARKER,
+        SEED_IMAGE_DESCRIPTION_MARKER,
+        AUDIO_TIMING_MARKER,
+        TAP_SYNC_MARKER,
+        MOTION_MARKER,
+        NEGATIVE_MARKER,
+    ):
+        assert result["final_prompt"].count(marker) == 1
 
 
-def test_synthesis_retries_when_first_draft_is_too_short():
+def test_over_limit_visual_response_retries_with_same_predeclared_limit():
     native = _native_analysis()
-    expected = _valid_final_prompt(native)
-    client = FakeClient(
-        [
-            (
-                f"{SUBJECT_LOCK_MARKER}\nshort\n"
-                f"{SEED_IMAGE_DESCRIPTION_MARKER}\nshort\n"
-                f"{AUDIO_TIMING_MARKER}\nshort\n"
-                f"{TAP_SYNC_MARKER}\nshort\n"
-                f"{MOTION_MARKER}\nshort\n"
-                f"{NEGATIVE_MARKER}\nshort"
-            ),
-            expected,
-        ]
+    probe = FakeClient([""])
+    try:
+        synthesize_final_ltx_prompt(_item(native), client=probe, max_attempts=1)
+    except ValueError:
+        pass
+    exact_limit = int(
+        __import__("re").search(
+            r"HARD CHARACTER LIMIT: (\d+)", probe.calls[0]["system"]
+        ).group(1)
     )
+    valid = _bounded_visual(exact_limit)
+    client = FakeClient(["x" * (exact_limit + 100), valid])
 
-    result = synthesize_final_ltx_prompt(
-        _item(native),
-        client=client,
-        max_chars=5000,
-    )
+    result = synthesize_final_ltx_prompt(_item(native), client=client, max_attempts=2)
 
     assert result["attempt_count"] == 2
+    assert result["seed_description"] == valid
+    assert result["attempts"][0]["description_char_limit_given_before_generation"] == exact_limit
+    assert f"no more than {exact_limit} characters" in client.calls[1]["user"]
+
+
+def test_legacy_full_prompt_response_remains_compatible():
+    native = _native_analysis()
+    expected = _valid_legacy_final_prompt(native)
+    client = FakeClient([expected])
+
+    result = synthesize_final_ltx_prompt(_item(native), client=client, max_chars=5000)
+
+    assert result["status"] == "complete"
+    assert result["mode"] == "legacy_full_prompt_compatibility"
     assert result["final_prompt"] == expected
-    assert result["attempts"][0]["problems"]
+    assert result["final_prompt_char_count"] <= 5000
 
 
 def test_compact_item_uses_gemma_synthesis_as_exact_ltx_payload(monkeypatch):
     native = _native_analysis()
-    expected = _valid_final_prompt(native)
+    expected = _valid_legacy_final_prompt(native)
+    visual = "Detailed synthesized visual description. " * 100
 
     def fake_synthesis(item, **kwargs):
         return {
             "status": "complete",
             "provider": "ollama",
             "model": "gemma3:4b",
-            "mode": "gemma_full_native_analysis_to_final_ltx_prompt",
+            "mode": "gemma_bounded_visual_description_python_envelope",
             "source_native_analysis_chars": len(native),
             "final_prompt": expected,
             "final_prompt_char_count": len(expected),
-            "seed_description_char_count": 3900,
+            "seed_description": visual,
+            "seed_description_char_count": len(visual),
+            "description_char_limit_given_before_generation": len(visual) + 200,
+            "description_modified_after_generation": False,
             "hard_limit_chars": 5000,
             "target_min_chars": 4700,
             "target_max_chars": 4980,
@@ -205,6 +264,6 @@ def test_compact_item_uses_gemma_synthesis_as_exact_ltx_payload(monkeypatch):
     assert compacted["prompt_text_is_exact_ltx_payload"] is True
     assert compacted["prompt_text_chars"] == len(expected)
     assert compacted["seed_image_analysis"]["description"] == native
-    assert compacted["gemma_final_prompt_synthesis"]["final_prompt"] == expected
+    assert compacted["gemma_final_prompt_synthesis"]["seed_description"] == visual
     assert compacted["prompt_budget"]["status"] == "gemma_synthesized"
     assert compacted["prompt_budget"]["seed_analysis_summary_model_used"] is True
