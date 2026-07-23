@@ -115,6 +115,11 @@ def test_complete_with_failures_does_not_allow_root_success(tmp_path, monkeypatc
     monkeypatch.setattr(root_main, "configure_orchestrator", lambda paths: FakeOrchestrator())
     monkeypatch.setattr(
         root_main,
+        "configure_scene_specific_plan_export",
+        lambda orchestrator: orchestrator,
+    )
+    monkeypatch.setattr(
+        root_main,
         "assert_no_root_leaks",
         lambda run_id: {"run_id": run_id, "root_leak_count": 0, "root_leaks": []},
     )
