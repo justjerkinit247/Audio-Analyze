@@ -27,12 +27,14 @@ class FakeClient:
 
 def _native_analysis():
     return (
-        "Detailed visual analysis of two foreground performers in an ornate Gothic "
-        "cathedral, including their appearance, wardrobe, pose, relationship, choir "
-        "placement, stained-glass architecture, camera framing, depth, golden light, "
-        "color contrast, floor texture, composition, atmosphere, and photographic style. "
+        (
+            "Detailed visual analysis of two foreground performers in an ornate Gothic "
+            "cathedral, including their appearance, wardrobe, pose, relationship, choir "
+            "placement, stained-glass architecture, camera framing, depth, golden light, "
+            "color contrast, floor texture, composition, atmosphere, and photographic style. "
+        )
         * 35
-    )
+    ).strip()
 
 
 def _item(native):
