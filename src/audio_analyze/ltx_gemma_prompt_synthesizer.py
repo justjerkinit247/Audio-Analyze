@@ -34,25 +34,19 @@ DEFAULT_NUM_PREDICT = 2600
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_ATTEMPTS = 3
 
-
 VISUAL_DESCRIPTION_SYSTEM = """You are Gemma's visual-description stage for an LTX image-to-video prompt.
 
-Return ONLY the rich visual description that belongs in the final visual-description section.
-Do not return any section labels, headings, bullets, code fences, character counts, notes, introductions, conclusions, or requests for feedback.
+Return ONLY the rich visual description that belongs inside the final [SEED_IMAGE_DESCRIPTION] section.
+Do not return any section label, heading, bullet list, code fence, character count, note, introduction, conclusion, or request for feedback.
+Never output any of these reserved strings: [SUBJECT_LOCK], [SEED_IMAGE_DESCRIPTION], [AUDIO_TIMING], [TAP_SYNC], [MOTION_PROMPT], [NEGATIVE_PROMPT].
 
-Your response will be inserted into the final LTX prompt VERBATIM. Python will not rewrite, summarize, truncate, or otherwise alter your descriptive wording after you return it.
+Your response will be inserted into a Python-owned final LTX prompt envelope VERBATIM. Python will not rewrite, summarize, truncate, or otherwise alter your descriptive wording after you return it.
 
 HARD CHARACTER LIMIT: {description_max_chars} Unicode characters total, including spaces and line breaks.
 TARGET: use as much of the available allowance as naturally useful, but never exceed {description_max_chars} characters.
 
-Condense the complete native image analysis while preserving its concrete visual substance: visible subject count and relationships, identities and appearance, wardrobe, pose, foreground/background layout, choir, cathedral architecture, stained glass, camera framing and angle, composition, depth, lighting, color, texture, atmosphere, photographic or cinematic style, and visible action cues. Remove only conversational filler, repeated wording, unsupported speculation, and generic recommendations. Do not invent anything that is not supported by the source analysis.
+Condense the complete native image analysis while preserving concrete visible substance: subject count and relationships, appearance, wardrobe, pose, foreground/background layout, environment, architecture, props, camera framing and angle, composition, depth, lighting, color, texture, atmosphere, photographic or cinematic style, and visible action cues. Remove only conversational filler, repeated wording, unsupported speculation, and generic recommendations. Do not invent anything unsupported by the source analysis.
 """
-
-LEGACY_FINAL_PROMPT_SYSTEM = (
-    "Return only the exact final LTX prompt. It must remain within {max_chars} "
-    "Unicode characters and contain all required section markers exactly once "
-    "in the required order."
-)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -147,18 +141,30 @@ def _format_number(value: Any, digits: int = 2) -> str:
 
 def _subject_lock(item: dict[str, Any]) -> str:
     policy = item.get("subject_count_policy") or {}
-    parts = ["Preserve every visible subject and the seed image's body layout."]
+    requirements = [
+        _clean_inline(value)
+        for value in list(policy.get("requirements") or [])
+        if _clean_inline(value)
+    ]
+    if requirements:
+        return _truncate_control(" ".join(requirements), 720)
+
+    parts = [
+        "Preserve every visible subject and the seed image's exact body layout.",
+        "Do not add, remove, merge, replace, hide, or duplicate any visible subject.",
+    ]
     if policy.get("has_pair"):
         parts.append(
-            "Keep the foreground woman and man together and visible throughout."
+            "Keep both visible foreground subjects together and visible throughout."
         )
     if policy.get("has_choir"):
-        parts.append("Keep the complete choir visible in the background.")
+        parts.append("Keep the complete existing choir visible in the background.")
     elif policy.get("has_group"):
         parts.append(
-            "Keep all background performers visible in their original layout."
+            "Keep every existing background performer visible in the original layout."
         )
-    parts.append("Do not add, remove, merge, replace, hide, or duplicate people.")
+    if policy.get("multiple_subjects"):
+        parts.append("Do not render the scene as solitary, solo, lone, or single-person.")
     return " ".join(parts)
 
 
@@ -173,7 +179,7 @@ def _audio_timing(item: dict[str, Any]) -> str:
     return (
         f"Scene {scene_index}: {start}s-{end}s, duration {duration}s, "
         f"{tempo} BPM, beat alignment {alignment}. Keep visible motion "
-        "synchronized to this audio window."
+        "synchronized to this supplied-audio window."
     )
 
 
@@ -199,13 +205,15 @@ def _tap_sync(item: dict[str, Any]) -> str:
             "heels down, knees bent, and body height stable. Maintain subtle pelvic "
             "micro-motion between taps. Do not convert the accents into jumping, "
             "hopping, standing up, repeated squats, whole-body bouncing, or feet "
-            "leaving the floor. Ignore bass-only boom hits."
+            "leaving the floor. Do not use kick-drum or bass-only boom hits as major "
+            "movement triggers."
         )
     return (
-        f"Primary tap accents: {targets}. Begin visible foreground motion "
-        "immediately. Use sharp clap, snare, hi-hat, and high-frequency tap "
-        "accents for controlled visible action changes. Maintain coherent motion "
-        "between accents and ignore bass-only boom hits."
+        f"Primary tap accents: {targets}. Begin visible foreground motion immediately. "
+        "Use sharp clap, snare, hi-hat, and similar high-frequency tap transients as "
+        "visible motion triggers. Land controlled visible action changes on each listed "
+        "primary tap accent. Maintain coherent foreground motion between accents. Do not "
+        "use kick-drum or bass-only boom hits as major movement triggers."
     )
 
 
@@ -214,36 +222,45 @@ def _motion(item: dict[str, Any]) -> str:
     source = expansion.get("ltx_motion_prompt") or (
         "Maintain continuous grounded motion and stable camera movement."
     )
-    return _truncate_control(str(source), 260)
+    return _truncate_control(str(source), 300)
 
 
 def _negative(item: dict[str, Any]) -> str:
     expansion = item.get("filename_hint_expansion") or {}
-    policy = item.get("choreography_policy") or {}
+    choreography = item.get("choreography_policy") or {}
     subject = item.get("subject_count_policy") or {}
+    defaults = [
+        "extra limbs",
+        "distorted anatomy",
+        "jumping",
+        "feet leaving the floor",
+        "missing visible foreground subject",
+        "changed subject count",
+        "warped background",
+        "flicker",
+    ]
+    if subject.get("has_pair"):
+        defaults.append("missing foreground partner")
+    if subject.get("has_choir"):
+        defaults.append("missing choir")
+    elif subject.get("has_group"):
+        defaults.append("missing background performers")
+
     terms: list[str] = []
+    seen: set[str] = set()
     for source in (
         str(expansion.get("negative_prompt") or "").split(","),
-        list(policy.get("negative_terms") or []),
+        list(choreography.get("negative_terms") or []),
         list(subject.get("negative_terms") or []),
-        [
-            "extra limbs",
-            "distorted anatomy",
-            "jumping",
-            "feet leaving the floor",
-            "missing male dancer",
-            "missing female dancer",
-            "missing choir",
-            "changed subject count",
-            "warped background",
-            "flicker",
-        ],
+        defaults,
     ):
         for raw in source:
             value = _clean_inline(raw).strip(" ,")
-            if value and value.lower() not in {entry.lower() for entry in terms}:
+            key = value.lower()
+            if value and key not in seen:
+                seen.add(key)
                 terms.append(value)
-    return _truncate_control(", ".join(terms), 380)
+    return _truncate_control(", ".join(terms), 430)
 
 
 def _control_sections(item: dict[str, Any]) -> dict[str, str]:
@@ -257,24 +274,11 @@ def _control_sections(item: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _visual_already_contains_marker(value: str) -> bool:
-    return value.lstrip().startswith(SEED_IMAGE_DESCRIPTION_MARKER)
-
-
 def _render_sections(sections: dict[str, str]) -> str:
-    blocks: list[str] = []
-    for marker in REQUIRED_MARKERS:
-        body = str(sections.get(marker, ""))
-        if (
-            marker == SEED_IMAGE_DESCRIPTION_MARKER
-            and _visual_already_contains_marker(body)
-        ):
-            # Gemma occasionally echoes the section label despite being told not to.
-            # Keep its response unchanged and avoid adding a duplicate wrapper label.
-            blocks.append(body.strip())
-        else:
-            blocks.append(f"{marker}\n{body.strip()}")
-    return "\n\n".join(blocks).strip()
+    return "\n\n".join(
+        f"{marker}\n{str(sections.get(marker, '')).strip()}"
+        for marker in REQUIRED_MARKERS
+    ).strip()
 
 
 def validate_final_prompt(
@@ -291,6 +295,9 @@ def validate_final_prompt(
         problems.append(
             f"prompt is {len(prompt)} characters; hard limit is {max_chars}"
         )
+    if not prompt.lstrip().startswith(SUBJECT_LOCK_MARKER):
+        problems.append("final prompt does not begin with [SUBJECT_LOCK]")
+
     positions: list[int] = []
     for marker in REQUIRED_MARKERS:
         count = prompt.count(marker)
@@ -311,10 +318,6 @@ def validate_final_prompt(
     return problems
 
 
-def _legacy_full_prompt(value: str) -> bool:
-    return all(marker in value for marker in REQUIRED_MARKERS)
-
-
 def _visual_user_prompt(
     native: str,
     *,
@@ -329,7 +332,7 @@ def _visual_user_prompt(
         correction = (
             f"\nYour previous response was {previous_length} characters. "
             f"Rewrite it so it is no more than {description_max_chars} characters. "
-            "Do not include any section label."
+            "Do not include any section label or reserved marker."
         )
     return (
         "Create the final visual description from the complete native analysis below.\n"
@@ -398,54 +401,7 @@ def synthesize_final_ltx_prompt(
                 previous_length=previous_length,
             ),
         )
-        value = _clean_response(raw)
-
-        if _legacy_full_prompt(value):
-            problems = validate_final_prompt(
-                value,
-                native_chars=len(native),
-                max_chars=max_chars,
-            )
-            attempts.append(
-                {
-                    "attempt": attempt,
-                    "response_mode": "legacy_full_prompt",
-                    "raw_char_count": len(str(raw or "")),
-                    "clean_prompt_char_count": len(value),
-                    "problems": list(problems),
-                }
-            )
-            if not problems:
-                visual = _section(
-                    value,
-                    SEED_IMAGE_DESCRIPTION_MARKER,
-                    AUDIO_TIMING_MARKER,
-                )
-                return {
-                    "status": "complete",
-                    "provider": "ollama",
-                    "model": selected_model,
-                    "mode": "legacy_full_prompt_compatibility",
-                    "source_native_analysis_chars": len(native),
-                    "final_prompt": value,
-                    "final_prompt_char_count": len(value),
-                    "seed_description": visual,
-                    "seed_description_char_count": len(visual),
-                    "description_char_limit_given_before_generation": description_max_chars,
-                    "description_modified_after_generation": False,
-                    "hard_limit_chars": int(max_chars),
-                    "target_min_chars": int(target_min),
-                    "target_max_chars": int(target_max),
-                    "attempt_count": attempt,
-                    "attempts": attempts,
-                    "validation_passed": True,
-                    "required_markers": list(REQUIRED_MARKERS),
-                    "config": asdict(local_client.config),
-                }
-            previous_length = len(value)
-            continue
-
-        visual = value
+        visual = _clean_response(raw)
         visual_problems: list[str] = []
         if not visual:
             visual_problems.append("Gemma returned an empty visual description")
@@ -454,25 +410,7 @@ def synthesize_final_ltx_prompt(
                 f"visual description is {len(visual)} characters; exact limit supplied "
                 f"beforehand was {description_max_chars}"
             )
-
-        visual_marker_count = visual.count(SEED_IMAGE_DESCRIPTION_MARKER)
-        if visual_marker_count > 1:
-            visual_problems.append(
-                f"Gemma echoed the visual section label {visual_marker_count} times"
-            )
-        elif visual_marker_count == 1 and not _visual_already_contains_marker(visual):
-            visual_problems.append(
-                "Gemma placed the visual section label inside the description instead "
-                "of at the beginning"
-            )
-
-        for forbidden_marker in (
-            SUBJECT_LOCK_MARKER,
-            AUDIO_TIMING_MARKER,
-            TAP_SYNC_MARKER,
-            MOTION_MARKER,
-            NEGATIVE_MARKER,
-        ):
+        for forbidden_marker in REQUIRED_MARKERS:
             if forbidden_marker in visual:
                 visual_problems.append(
                     f"Gemma included forbidden control marker {forbidden_marker}"
