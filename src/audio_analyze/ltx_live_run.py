@@ -31,8 +31,10 @@ DEFAULT_GUIDANCE_SCALE = 9.0
 DEFAULT_SCENE_SECONDS = 8.0
 DEFAULT_OLLAMA_MODEL = "gemma3:4b"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+LEGACY_PROMPT_PREFIX = "Audio-and-image-to-video continuation"
 REQUIRED_MARKERS = (
     "[SUBJECT_LOCK]",
+    "[SEED_IMAGE_DESCRIPTION]",
     "[AUDIO_TIMING]",
     "[TAP_SYNC]",
     "[MOTION_PROMPT]",
@@ -155,6 +157,68 @@ def _make_run_paths(repo: Path) -> RunPaths:
     )
 
 
+def _section_between(prompt: str, marker: str, next_marker: str) -> str:
+    if marker not in prompt or next_marker not in prompt:
+        return ""
+    return prompt.split(marker, 1)[1].split(next_marker, 1)[0].strip()
+
+
+def _validate_gemma_exact_payload(scene: dict[str, Any], problems: list[str]) -> str:
+    prompt = str(scene.get("prompt_text") or "")
+    analysis = scene.get("seed_image_analysis") or {}
+    synthesis = scene.get("gemma_final_prompt_synthesis") or {}
+    exact_prompt = str(scene.get("exact_prompt_sent_to_ltx") or "")
+
+    if analysis.get("status") != "complete":
+        problems.append("Gemma seed-image analysis did not complete")
+    if analysis.get("analysis_mode") != "freeform_native":
+        problems.append("Gemma seed-image analysis is not freeform_native")
+    if not str(analysis.get("description") or "").strip():
+        problems.append("Gemma native seed-image description is empty")
+
+    if synthesis.get("status") != "complete":
+        problems.append("Gemma final-prompt synthesis did not complete")
+    if synthesis.get("validation_passed") is not True:
+        problems.append("Gemma final-prompt validation did not pass")
+    if scene.get("prompt_text_is_exact_ltx_payload") is not True:
+        problems.append("prompt_text is not certified as the exact LTX payload")
+    if exact_prompt != prompt:
+        problems.append("exact_prompt_sent_to_ltx does not match prompt_text")
+    if str(synthesis.get("final_prompt") or "") != prompt:
+        problems.append("Gemma synthesis final_prompt does not match prompt_text")
+    if (scene.get("prompt_budget") or {}).get("status") != "gemma_synthesized":
+        problems.append("final prompt did not use the Gemma synthesis path")
+
+    stripped = prompt.lstrip()
+    if not stripped.startswith(REQUIRED_MARKERS[0]):
+        problems.append("final payload does not begin with [SUBJECT_LOCK]")
+    if stripped.startswith(LEGACY_PROMPT_PREFIX):
+        problems.append("legacy continuation-prefix payload is forbidden")
+    if len(prompt) > 5000:
+        problems.append(f"prompt is over 5,000 characters ({len(prompt)})")
+    if not prompt:
+        problems.append("final prompt is empty")
+
+    positions: list[int] = []
+    for marker in REQUIRED_MARKERS:
+        count = prompt.count(marker)
+        if count != 1:
+            problems.append(f"{marker} appears {count} times instead of exactly once")
+        positions.append(prompt.find(marker))
+    if all(position >= 0 for position in positions) and positions != sorted(positions):
+        problems.append("required prompt markers are out of order")
+
+    visual = _section_between(
+        prompt,
+        "[SEED_IMAGE_DESCRIPTION]",
+        "[AUDIO_TIMING]",
+    )
+    if not visual:
+        problems.append("final [SEED_IMAGE_DESCRIPTION] section is empty")
+
+    return prompt
+
+
 def _validate_plan(
     plan: dict[str, Any],
     report: dict[str, Any],
@@ -176,16 +240,11 @@ def _validate_plan(
         problems.append("plan is not marked fresh-only")
 
     if scene:
-        prompt = str(scene.get("prompt_text") or "")
+        prompt = _validate_gemma_exact_payload(scene, problems)
         if scene.get("seed_filename_used_for_prompt_hint") != seed_filename:
             problems.append("Ollama did not receive the exact seed filename")
         if scene.get("prompt_transport_mode") != "audio_and_image_to_video":
             problems.append("prompt transport is not audio-and-image-to-video")
-        if len(prompt) > 5000:
-            problems.append(f"prompt is over 5,000 characters ({len(prompt)})")
-        for marker in REQUIRED_MARKERS:
-            if marker not in prompt:
-                problems.append(f"prompt is missing {marker}")
 
         subject_policy = scene.get("subject_count_policy") or {}
         motion = str(
@@ -323,9 +382,13 @@ def run_interactive(args: argparse.Namespace) -> int:
     prompt = str(scene["prompt_text"])
     _write_text(paths.prompt, prompt)
     policy = scene.get("choreography_policy") or {}
+    synthesis = scene.get("gemma_final_prompt_synthesis") or {}
 
     print("\n================ PLAN READY ================")
     print(f"Prompt length: {len(prompt)} / 5000")
+    print("Gemma exact payload verified: YES")
+    print(f"Gemma model: {synthesis.get('model')}")
+    print(f"Gemma synthesis attempts: {synthesis.get('attempt_count')}")
     print(f"Choreography profile: {policy.get('profile_id') or scene.get('tap_motion_profile')}")
     print(f"Profile selection: {policy.get('selection_method')}")
     print(
