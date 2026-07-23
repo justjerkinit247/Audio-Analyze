@@ -19,6 +19,14 @@ DEFAULT_OLLAMA_VISION_TIMEOUT_SECONDS = 600
 SEED_IMAGE_DESCRIPTION_MARKER = "[SEED_IMAGE_DESCRIPTION]"
 VISION_ANALYSIS_MODE = "freeform_native"
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+RESERVED_PROMPT_MARKERS = (
+    "[SUBJECT_LOCK]",
+    "[SEED_IMAGE_DESCRIPTION]",
+    "[AUDIO_TIMING]",
+    "[TAP_SYNC]",
+    "[MOTION_PROMPT]",
+    "[NEGATIVE_PROMPT]",
+)
 
 VISION_SYSTEM_PROMPT = (
     "You are an expert visual analyst. Analyze the supplied image independently, freely, "
@@ -64,11 +72,25 @@ def _vision_config(model: str) -> LocalAIConfig:
 
 
 def _clean_description(value: str) -> str:
-    # Preserve Gemma's native formatting and wording. Only surrounding whitespace is removed.
+    # Preserve Gemma's native wording and internal formatting. Only outer whitespace is removed.
     text = str(value or "").strip()
     if not text:
         raise LocalAIError("Ollama returned an empty seed-image description.")
     return text
+
+
+def escape_reserved_prompt_markers(value: str) -> str:
+    """Make model-authored marker text inert inside pipeline-owned prompt sections.
+
+    The native Gemma response remains unchanged in ``seed_image_analysis.description``.
+    Only intermediate rendered prompt context uses full-width brackets so downstream
+    section parsers cannot mistake model-authored text for pipeline-owned boundaries.
+    """
+
+    escaped = str(value or "")
+    for marker in RESERVED_PROMPT_MARKERS:
+        escaped = escaped.replace(marker, f"［{marker[1:-1]}］")
+    return escaped
 
 
 def analyze_seed_image(
@@ -108,7 +130,7 @@ def analyze_seed_image(
         "description": description,
         "description_char_count": len(description),
         "description_line_count": len(description.splitlines()),
-        # Keep compatibility with the prompt builder, but do not summarize or select here.
+        # Native metadata remains unmodified and is supplied directly to final synthesis.
         "prompt_context": description,
         "prompt_context_char_count": len(description),
         "prompt_context_selection": "full_native_analysis_unmodified",
@@ -152,7 +174,7 @@ def render_seed_image_description_block(analysis: dict[str, Any]) -> str:
         or ""
     ).strip()
     if description:
-        body = description
+        body = escape_reserved_prompt_markers(description)
     else:
         error = str(analysis.get("error") or "analysis unavailable").strip()
         body = (
