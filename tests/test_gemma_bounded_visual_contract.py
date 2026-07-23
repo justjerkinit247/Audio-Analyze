@@ -1,6 +1,7 @@
+import pytest
+
 from audio_analyze.local_ai_client import LocalAIConfig
 from audio_analyze.ltx_gemma_prompt_synthesizer import (
-    AUDIO_TIMING_MARKER,
     SEED_IMAGE_DESCRIPTION_MARKER,
     synthesize_final_ltx_prompt,
 )
@@ -34,9 +35,13 @@ def _item() -> dict:
             "has_choir": True,
             "has_group": True,
             "multiple_subjects": True,
+            "requirements": [
+                "Preserve every visible person from the seed image.",
+                "Keep both visible foreground subjects together throughout.",
+                "Keep the existing choir visible in the background.",
+            ],
             "negative_terms": [
-                "missing male dancer",
-                "missing female dancer",
+                "missing foreground partner",
                 "missing choir",
             ],
         },
@@ -85,22 +90,18 @@ def test_short_under_budget_description_is_accepted_unchanged():
     assert result["description_modified_after_generation"] is False
     assert result["final_prompt_char_count"] <= 5000
     assert result["final_prompt"].count(SEED_IMAGE_DESCRIPTION_MARKER) == 1
+    assert result["final_prompt"].startswith("[SUBJECT_LOCK]")
 
 
-def test_single_echoed_visual_marker_is_not_duplicated_or_removed():
+def test_visual_response_with_reserved_marker_is_rejected():
     visual = (
         f"{SEED_IMAGE_DESCRIPTION_MARKER}\n"
-        "Two foreground performers remain together inside the cathedral, with the choir "
-        "visible behind them under dramatic golden stained-glass illumination."
-    )
-    result = synthesize_final_ltx_prompt(
-        _item(),
-        client=FakeClient(visual),
-        max_attempts=1,
+        "Two foreground performers remain together inside the cathedral."
     )
 
-    assert result["seed_description"] == visual
-    assert result["final_prompt"].count(SEED_IMAGE_DESCRIPTION_MARKER) == 1
-    assert result["final_prompt"].index(SEED_IMAGE_DESCRIPTION_MARKER) < result[
-        "final_prompt"
-    ].index(AUDIO_TIMING_MARKER)
+    with pytest.raises(ValueError, match="forbidden control marker"):
+        synthesize_final_ltx_prompt(
+            _item(),
+            client=FakeClient(visual),
+            max_attempts=1,
+        )
