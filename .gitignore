@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.pytest_tmp*/
 .DS_Store
 
 # Local environment and secrets
@@ -14,6 +15,10 @@ venv/
 
 # Local generated outputs
 outputs/
+
+# Local backup/checkpoint trees
+.asmo_backups/
+local_backups/
 
 # Local archive exports
 archive/runway_generations/local_exports/
