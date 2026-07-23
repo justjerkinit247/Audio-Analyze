@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import asdict
 from typing import Any
 
 try:
-    from .local_ai_client import LocalAIClient, LocalAIConfig, LocalAIError
+    from .local_ai_client import LocalAIClient, LocalAIConfig
 except ImportError:
-    from local_ai_client import LocalAIClient, LocalAIConfig, LocalAIError
+    from local_ai_client import LocalAIClient, LocalAIConfig
 
 
 SUBJECT_LOCK_MARKER = "[SUBJECT_LOCK]"
@@ -35,26 +34,22 @@ DEFAULT_NUM_PREDICT = 2600
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_ATTEMPTS = 3
 
-FINAL_PROMPT_SYSTEM = """You are the final prompt composer for LTX audio-and-image-to-video generation.
 
-Return ONLY the exact final prompt that will be sent to LTX. Do not add explanations, notes, code fences, character counts, or conversational text.
+VISUAL_DESCRIPTION_SYSTEM = """You are Gemma's visual-description stage for an LTX image-to-video prompt.
 
-Hard requirements:
-- The complete response must be no more than {max_chars} Unicode characters.
-- Aim for {target_min}-{target_max} characters when the source material is long enough.
-- Use these section markers exactly once and in this exact order:
-  [SUBJECT_LOCK]
-  [SEED_IMAGE_DESCRIPTION]
-  [AUDIO_TIMING]
-  [TAP_SYNC]
-  [MOTION_PROMPT]
-  [NEGATIVE_PROMPT]
-- The [SEED_IMAGE_DESCRIPTION] section is the priority. Condense the ENTIRE native Gemma image analysis into a rich, comprehensive description. Preserve every concrete useful visual fact: subject count, identities and appearance, wardrobe, pose, relationship, foreground/background layout, camera framing and angle, composition, depth, architecture, environment, lighting, color, texture, atmosphere, style, and visible action cues.
-- Remove only conversational introductions/outros, requests for feedback, repeated wording, unsupported speculation, and generic video recommendations.
-- Integrate the supplied subject, audio, tap, motion, and negative controls accurately and concisely.
-- The seed image remains the visual authority. Do not invent new subjects, props, wardrobe, architecture, or scene changes.
-- Do not omit the choir, foreground pair, cathedral, lighting, framing, or other concrete details present in the native analysis.
+Return ONLY the rich visual description that belongs inside [SEED_IMAGE_DESCRIPTION].
+Do not return section markers, headings, bullets, code fences, character counts, notes, introductions, conclusions, or requests for feedback.
+
+Your response will be inserted into the final LTX prompt VERBATIM. Python will not rewrite, summarize, truncate, or otherwise alter it after you return it.
+
+HARD CHARACTER LIMIT: {description_max_chars} Unicode characters total, including spaces and line breaks.
+TARGET: use approximately {description_target_min}-{description_target_max} characters when the source contains enough useful detail.
+
+Condense the complete native image analysis while preserving its concrete visual substance: visible subject count and relationships, identities and appearance, wardrobe, pose, foreground/background layout, choir, cathedral architecture, stained glass, camera framing and angle, composition, depth, lighting, color, texture, atmosphere, photographic or cinematic style, and visible action cues. Remove only conversational filler, repeated wording, unsupported speculation, and generic recommendations. Do not invent anything that is not supported by the source analysis.
 """
+
+
+LEGACY_FINAL_PROMPT_SYSTEM = """Return only the exact final LTX prompt. It must remain within {max_chars} Unicode characters and contain all required section markers exactly once in the required order."""
 
 
 def _int_env(name: str, default: int) -> int:
@@ -96,17 +91,31 @@ def _config(model: str) -> LocalAIConfig:
     )
 
 
-def _clean_prompt(text: str) -> str:
+def _clean_response(text: str) -> str:
     value = str(text or "").strip()
     fence = re.fullmatch(r"```(?:text|markdown)?\s*(.*?)\s*```", value, re.DOTALL | re.I)
     if fence:
         value = fence.group(1).strip()
+    return value
 
-    first_marker = value.find(SUBJECT_LOCK_MARKER)
-    if first_marker > 0:
-        value = value[first_marker:]
 
-    return value.strip()
+def _clean_inline(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _truncate_control(text: str, limit: int) -> str:
+    value = _clean_inline(text)
+    if len(value) <= limit:
+        return value
+    candidate = value[: max(1, limit - 1)].rstrip()
+    boundary = max(candidate.rfind(". "), candidate.rfind("; "), candidate.rfind(", "))
+    if boundary >= int(limit * 0.55):
+        candidate = candidate[: boundary + 1].rstrip()
+    else:
+        word = candidate.rfind(" ")
+        if word > 0:
+            candidate = candidate[:word]
+    return candidate.rstrip(" ,;:") + "."
 
 
 def _section(prompt: str, marker: str, next_marker: str | None) -> str:
@@ -118,12 +127,127 @@ def _section(prompt: str, marker: str, next_marker: str | None) -> str:
     return tail.strip()
 
 
+def _format_number(value: Any, digits: int = 2) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def _subject_lock(item: dict[str, Any]) -> str:
+    policy = item.get("subject_count_policy") or {}
+    parts = ["Preserve every visible subject and the seed image's body layout."]
+    if policy.get("has_pair"):
+        parts.append("Keep the foreground woman and man together and visible throughout.")
+    if policy.get("has_choir"):
+        parts.append("Keep the complete choir visible in the background.")
+    elif policy.get("has_group"):
+        parts.append("Keep all background performers visible in their original layout.")
+    parts.append("Do not add, remove, merge, replace, hide, or duplicate people.")
+    return " ".join(parts)
+
+
+def _audio_timing(item: dict[str, Any]) -> str:
+    timing = item.get("audio_timing") or {}
+    scene_index = timing.get("scene_index") or item.get("clip_index") or 1
+    start = _format_number(timing.get("start_seconds"), 2)
+    end = _format_number(timing.get("end_seconds"), 2)
+    duration = _format_number(timing.get("duration_seconds"), 2)
+    tempo = _format_number(timing.get("tempo_bpm"), 2)
+    alignment = "enabled" if timing.get("beat_alignment_enabled") else "disabled"
+    return (
+        f"Scene {scene_index}: {start}s-{end}s, duration {duration}s, {tempo} BPM, "
+        f"beat alignment {alignment}. Keep visible motion synchronized to this audio window."
+    )
+
+
+def _target_text(item: dict[str, Any]) -> str:
+    tap = item.get("tap_sync") or {}
+    targets = tap.get("primary_sync_targets_relative_seconds") or []
+    if not targets:
+        return "no reliable tap accents detected"
+    return ", ".join(f"{float(value):.3f}s" for value in targets)
+
+
+def _tap_sync(item: dict[str, Any]) -> str:
+    profile = item.get("tap_motion_profile") or (item.get("tap_sync") or {}).get(
+        "motion_profile"
+    )
+    targets = _target_text(item)
+    if profile == "localized_glute_pulse":
+        return (
+            f"Primary tap accents: {targets}. Begin visible foreground motion immediately at 0.00s. "
+            "At each clap, snare, hi-hat, or sharp tap use one compact localized twerk pulse: "
+            "a glute-cheek contraction, small backward pelvis pop, and controlled recoil. "
+            "Both feet remain planted, heels down, knees bent, and body height stable. "
+            "Maintain subtle pelvic micro-motion between taps. Do not convert the accents into jumping, "
+            "hopping, standing up, repeated squats, whole-body bouncing, or feet leaving the floor. "
+            "Ignore bass-only boom hits."
+        )
+    return (
+        f"Primary tap accents: {targets}. Begin visible foreground motion immediately. "
+        "Use sharp clap, snare, hi-hat, and high-frequency tap accents for controlled visible action changes. "
+        "Maintain coherent motion between accents and ignore bass-only boom hits."
+    )
+
+
+def _motion(item: dict[str, Any]) -> str:
+    expansion = item.get("filename_hint_expansion") or {}
+    source = expansion.get("ltx_motion_prompt") or "Maintain continuous grounded motion and stable camera movement."
+    return _truncate_control(str(source), 260)
+
+
+def _negative(item: dict[str, Any]) -> str:
+    expansion = item.get("filename_hint_expansion") or {}
+    policy = item.get("choreography_policy") or {}
+    subject = item.get("subject_count_policy") or {}
+    terms: list[str] = []
+    for source in (
+        str(expansion.get("negative_prompt") or "").split(","),
+        list(policy.get("negative_terms") or []),
+        list(subject.get("negative_terms") or []),
+        [
+            "extra limbs",
+            "distorted anatomy",
+            "jumping",
+            "feet leaving the floor",
+            "missing male dancer",
+            "missing female dancer",
+            "missing choir",
+            "changed subject count",
+            "warped background",
+            "flicker",
+        ],
+    ):
+        for raw in source:
+            value = _clean_inline(raw).strip(" ,")
+            if value and value.lower() not in {item.lower() for item in terms}:
+                terms.append(value)
+    return _truncate_control(", ".join(terms), 380)
+
+
+def _control_sections(item: dict[str, Any]) -> dict[str, str]:
+    return {
+        SUBJECT_LOCK_MARKER: _subject_lock(item),
+        SEED_IMAGE_DESCRIPTION_MARKER: "",
+        AUDIO_TIMING_MARKER: _audio_timing(item),
+        TAP_SYNC_MARKER: _tap_sync(item),
+        MOTION_MARKER: _motion(item),
+        NEGATIVE_MARKER: _negative(item),
+    }
+
+
+def _render_sections(sections: dict[str, str]) -> str:
+    blocks = [f"{marker}\n{sections.get(marker, '').strip()}" for marker in REQUIRED_MARKERS]
+    return "\n\n".join(blocks).strip()
+
+
 def _minimum_output_chars(native_chars: int, max_chars: int) -> int:
     if native_chars >= 4500:
         return min(max_chars - 250, 4550)
     if native_chars >= 3000:
-        return min(max_chars - 500, max(3000, int(native_chars * 0.88)))
-    return min(max_chars - 700, max(1200, int(native_chars * 0.80)))
+        return min(max_chars - 400, max(3000, int(native_chars * 0.82)))
+    return min(max_chars - 500, max(1200, int(native_chars * 0.72)))
 
 
 def validate_final_prompt(
@@ -135,92 +259,49 @@ def validate_final_prompt(
     problems: list[str] = []
     if not prompt:
         return ["Gemma returned an empty final prompt."]
-
     if len(prompt) > max_chars:
-        problems.append(
-            f"prompt is {len(prompt)} characters; hard limit is {max_chars}"
-        )
-
-    minimum_chars = _minimum_output_chars(native_chars, max_chars)
-    if len(prompt) < minimum_chars:
-        problems.append(
-            f"prompt is only {len(prompt)} characters; minimum target is {minimum_chars}"
-        )
-
+        problems.append(f"prompt is {len(prompt)} characters; hard limit is {max_chars}")
     positions: list[int] = []
     for marker in REQUIRED_MARKERS:
         count = prompt.count(marker)
         if count != 1:
             problems.append(f"{marker} appears {count} times instead of exactly once")
         positions.append(prompt.find(marker))
-
     if all(position >= 0 for position in positions) and positions != sorted(positions):
         problems.append("required markers are not in the required order")
-
-    visual = _section(
-        prompt,
-        SEED_IMAGE_DESCRIPTION_MARKER,
-        AUDIO_TIMING_MARKER,
-    )
-    minimum_visual = min(3600, max(1200, int(native_chars * 0.68)))
+    visual = _section(prompt, SEED_IMAGE_DESCRIPTION_MARKER, AUDIO_TIMING_MARKER)
+    minimum_visual = min(3200, max(1000, int(native_chars * 0.58)))
     if len(visual) < minimum_visual:
         problems.append(
-            f"seed-image description is only {len(visual)} characters; "
-            f"minimum target is {minimum_visual}"
+            f"seed-image description is only {len(visual)} characters; minimum target is {minimum_visual}"
         )
-
     return problems
 
 
-def _control_payload(item: dict[str, Any]) -> dict[str, Any]:
-    expansion = item.get("filename_hint_expansion") or {}
-    analysis = item.get("seed_image_analysis") or {}
-    return {
-        "seed_filename": (
-            item.get("seed_filename_used_for_prompt_hint")
-            or item.get("seed_image_used")
-        ),
-        "native_image_analysis": analysis.get("description") or "",
-        "subject_count_policy": item.get("subject_count_policy") or {},
-        "subject_lock": item.get("subject_lock_prompt_block") or "",
-        "audio_timing": item.get("audio_timing") or {},
-        "audio_timing_prompt": item.get("audio_timing_prompt_block") or "",
-        "tap_sync": item.get("tap_sync") or {},
-        "tap_sync_prompt": item.get("tap_sync_prompt_block") or "",
-        "motion_prompt": expansion.get("ltx_motion_prompt") or "",
-        "negative_prompt": expansion.get("negative_prompt") or "",
-        "choreography_policy": item.get("choreography_policy") or {},
-        "prompt_transport_mode": item.get("prompt_transport_mode"),
-    }
+def _legacy_full_prompt(value: str) -> bool:
+    return all(marker in value for marker in REQUIRED_MARKERS)
 
 
-def _user_prompt(
-    item: dict[str, Any],
+def _visual_user_prompt(
+    native: str,
     *,
     attempt: int,
-    previous_prompt: str = "",
-    previous_problems: list[str] | None = None,
-    max_chars: int,
-    target_min: int,
-    target_max: int,
+    description_max_chars: int,
+    description_target_min: int,
+    description_target_max: int,
+    previous_length: int | None = None,
 ) -> str:
-    payload = _control_payload(item)
     correction = ""
     if attempt > 1:
         correction = (
-            "\n\nThe previous draft failed validation.\n"
-            f"Problems: {json.dumps(previous_problems or [], ensure_ascii=False)}\n"
-            f"Previous draft character count: {len(previous_prompt)}\n"
-            "Rewrite it from the complete source. Preserve more visual detail, obey the "
-            "marker contract, and stay inside the hard character limit.\n"
+            f"\nYour previous response was {previous_length} characters. Rewrite it so it is no more than "
+            f"{description_max_chars} characters while preserving more concrete visual detail than filler."
         )
-
     return (
-        "Compose the exact final LTX prompt from this complete source package."
-        f"\nHard maximum: {max_chars} characters."
-        f"\nTarget range: {target_min}-{target_max} characters."
-        f"{correction}\n\nSOURCE PACKAGE:\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        f"Create the final visual description from the complete native analysis below.\n"
+        f"HARD MAXIMUM BEFORE YOU BEGIN: {description_max_chars} Unicode characters.\n"
+        f"Preferred range: {description_target_min}-{description_target_max} characters."
+        f"{correction}\n\nCOMPLETE NATIVE IMAGE ANALYSIS:\n{native}"
     )
 
 
@@ -245,80 +326,149 @@ def synthesize_final_ltx_prompt(
         or os.environ.get("OLLAMA_VISION_MODEL", "gemma3:4b").strip()
         or "gemma3:4b"
     )
-    effective_target_max = min(int(max_chars), int(target_max))
-    effective_target_min = min(
-        effective_target_max,
-        max(_minimum_output_chars(len(native), max_chars), int(target_min)),
-    )
     local_client = client or LocalAIClient(_config(selected_model))
-    system = FINAL_PROMPT_SYSTEM.format(
-        max_chars=int(max_chars),
-        target_min=effective_target_min,
-        target_max=effective_target_max,
+
+    sections = _control_sections(item)
+    fixed_prompt = _render_sections(sections)
+    description_max_chars = int(max_chars) - len(fixed_prompt)
+    if description_max_chars < 1000:
+        raise ValueError(
+            "The required nonvisual LTX controls leave only "
+            f"{description_max_chars} characters for Gemma's description."
+        )
+    description_target_max = max(1, description_max_chars - 20)
+    description_target_min = min(
+        description_target_max,
+        max(1200, int(description_max_chars * 0.88)),
+    )
+    system = VISUAL_DESCRIPTION_SYSTEM.format(
+        description_max_chars=description_max_chars,
+        description_target_min=description_target_min,
+        description_target_max=description_target_max,
     )
 
-    previous_prompt = ""
-    previous_problems: list[str] = []
     attempts: list[dict[str, Any]] = []
-
+    previous_length: int | None = None
     for attempt in range(1, max(1, int(max_attempts)) + 1):
         raw = local_client.chat_text(
             system,
-            _user_prompt(
-                item,
+            _visual_user_prompt(
+                native,
                 attempt=attempt,
-                previous_prompt=previous_prompt,
-                previous_problems=previous_problems,
-                max_chars=max_chars,
-                target_min=effective_target_min,
-                target_max=effective_target_max,
+                description_max_chars=description_max_chars,
+                description_target_min=description_target_min,
+                description_target_max=description_target_max,
+                previous_length=previous_length,
             ),
         )
-        prompt = _clean_prompt(raw)
-        problems = validate_final_prompt(
-            prompt,
-            native_chars=len(native),
-            max_chars=max_chars,
-        )
+        value = _clean_response(raw)
+
+        if _legacy_full_prompt(value):
+            problems = validate_final_prompt(
+                value,
+                native_chars=len(native),
+                max_chars=max_chars,
+            )
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "response_mode": "legacy_full_prompt",
+                    "raw_char_count": len(str(raw or "")),
+                    "clean_prompt_char_count": len(value),
+                    "problems": list(problems),
+                }
+            )
+            if not problems:
+                visual = _section(value, SEED_IMAGE_DESCRIPTION_MARKER, AUDIO_TIMING_MARKER)
+                return {
+                    "status": "complete",
+                    "provider": "ollama",
+                    "model": selected_model,
+                    "mode": "legacy_full_prompt_compatibility",
+                    "source_native_analysis_chars": len(native),
+                    "final_prompt": value,
+                    "final_prompt_char_count": len(value),
+                    "seed_description": visual,
+                    "seed_description_char_count": len(visual),
+                    "description_char_limit_given_before_generation": description_max_chars,
+                    "description_modified_after_generation": False,
+                    "hard_limit_chars": int(max_chars),
+                    "target_min_chars": int(target_min),
+                    "target_max_chars": int(target_max),
+                    "attempt_count": attempt,
+                    "attempts": attempts,
+                    "validation_passed": True,
+                    "required_markers": list(REQUIRED_MARKERS),
+                    "config": asdict(local_client.config),
+                }
+            previous_length = len(value)
+            continue
+
+        visual = value
+        visual_problems: list[str] = []
+        if not visual:
+            visual_problems.append("Gemma returned an empty visual description")
+        if len(visual) > description_max_chars:
+            visual_problems.append(
+                f"visual description is {len(visual)} characters; exact limit supplied beforehand was {description_max_chars}"
+            )
+        if len(visual) < min(2200, int(description_max_chars * 0.62)):
+            visual_problems.append(
+                f"visual description is only {len(visual)} characters and does not use enough of the available budget"
+            )
+
         attempts.append(
             {
                 "attempt": attempt,
+                "response_mode": "bounded_visual_description",
                 "raw_char_count": len(str(raw or "")),
-                "clean_prompt_char_count": len(prompt),
-                "problems": list(problems),
+                "visual_description_char_count": len(visual),
+                "description_char_limit_given_before_generation": description_max_chars,
+                "problems": list(visual_problems),
             }
         )
-        if not problems:
-            visual = _section(
-                prompt,
-                SEED_IMAGE_DESCRIPTION_MARKER,
-                AUDIO_TIMING_MARKER,
-            )
-            return {
-                "status": "complete",
-                "provider": "ollama",
-                "model": selected_model,
-                "mode": "gemma_full_native_analysis_to_final_ltx_prompt",
-                "source_native_analysis_chars": len(native),
-                "final_prompt": prompt,
-                "final_prompt_char_count": len(prompt),
-                "seed_description": visual,
-                "seed_description_char_count": len(visual),
-                "hard_limit_chars": int(max_chars),
-                "target_min_chars": effective_target_min,
-                "target_max_chars": effective_target_max,
-                "attempt_count": attempt,
-                "attempts": attempts,
-                "validation_passed": True,
-                "required_markers": list(REQUIRED_MARKERS),
-                "config": asdict(local_client.config),
-            }
+        if visual_problems:
+            previous_length = len(visual)
+            continue
 
-        previous_prompt = prompt
-        previous_problems = problems
+        sections[SEED_IMAGE_DESCRIPTION_MARKER] = visual
+        final_prompt = _render_sections(sections)
+        problems = validate_final_prompt(
+            final_prompt,
+            native_chars=len(native),
+            max_chars=max_chars,
+        )
+        if problems:
+            attempts[-1]["problems"].extend(problems)
+            previous_length = len(visual)
+            continue
 
-    detail = "; ".join(previous_problems) or "unknown validation failure"
+        return {
+            "status": "complete",
+            "provider": "ollama",
+            "model": selected_model,
+            "mode": "gemma_bounded_visual_description_python_envelope",
+            "source_native_analysis_chars": len(native),
+            "final_prompt": final_prompt,
+            "final_prompt_char_count": len(final_prompt),
+            "seed_description": visual,
+            "seed_description_char_count": len(visual),
+            "description_char_limit_given_before_generation": description_max_chars,
+            "description_target_min_chars": description_target_min,
+            "description_target_max_chars": description_target_max,
+            "description_modified_after_generation": False,
+            "hard_limit_chars": int(max_chars),
+            "target_min_chars": int(target_min),
+            "target_max_chars": int(target_max),
+            "attempt_count": attempt,
+            "attempts": attempts,
+            "validation_passed": True,
+            "required_markers": list(REQUIRED_MARKERS),
+            "config": asdict(local_client.config),
+        }
+
+    last = attempts[-1]["problems"] if attempts else ["unknown validation failure"]
     raise ValueError(
-        "Gemma could not produce a valid final LTX prompt after "
-        f"{len(attempts)} attempts: {detail}"
+        "Gemma could not produce a bounded visual description after "
+        f"{len(attempts)} attempts: {'; '.join(str(problem) for problem in last)}"
     )
