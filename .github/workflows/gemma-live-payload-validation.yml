@@ -1,0 +1,53 @@
+name: Gemma Live Payload Validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-gemma-live-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: src
+      OLLAMA_FINAL_PROMPT_SYNTHESIS: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile Gemma live path and tests
+        run: |
+          python -m compileall -q \
+            src/audio_analyze/ltx_seed_image_analyzer.py \
+            src/audio_analyze/ltx_gemma_prompt_synthesizer.py \
+            src/audio_analyze/ltx_prompt_budget.py \
+            src/audio_analyze/ltx_live_run.py \
+            tests/test_local_ai_vision.py \
+            tests/test_gemma_bounded_visual_contract.py \
+            tests/test_gemma_prompt_retention.py \
+            tests/test_ltx_live_run.py
+
+      - name: Run authoritative Gemma payload tests
+        run: |
+          python -m pytest -q \
+            tests/test_local_ai_vision.py \
+            tests/test_gemma_bounded_visual_contract.py \
+            tests/test_gemma_prompt_retention.py \
+            tests/test_ltx_live_run.py
