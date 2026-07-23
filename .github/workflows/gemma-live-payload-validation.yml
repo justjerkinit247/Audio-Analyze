@@ -29,8 +29,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r requirements.txt
 
       - name: Compile Gemma live path and tests
         run: |
@@ -45,9 +45,23 @@ jobs:
             tests/test_ltx_live_run.py
 
       - name: Run authoritative Gemma payload tests
+        shell: bash
         run: |
+          set +e
           python -m pytest -q \
             tests/test_local_ai_vision.py \
             tests/test_gemma_bounded_visual_contract.py \
             tests/test_gemma_prompt_retention.py \
-            tests/test_ltx_live_run.py
+            tests/test_ltx_live_run.py \
+            > pytest-gemma.log 2>&1
+          status=$?
+          cat pytest-gemma.log
+          exit $status
+
+      - name: Upload Gemma pytest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemma-pytest-report
+          path: pytest-gemma.log
+          if-no-files-found: error
