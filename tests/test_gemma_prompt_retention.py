@@ -1,3 +1,5 @@
+import pytest
+
 import audio_analyze.ltx_prompt_budget as prompt_budget
 from audio_analyze.ltx_gemma_prompt_synthesizer import (
     AUDIO_TIMING_MARKER,
@@ -43,9 +45,13 @@ def _item(native):
             "has_choir": True,
             "has_group": True,
             "multiple_subjects": True,
+            "requirements": [
+                "Preserve every visible person from the seed image.",
+                "Keep both visible foreground subjects together throughout.",
+                "Keep the existing choir visible in the background.",
+            ],
             "negative_terms": [
-                "missing male dancer",
-                "missing female dancer",
+                "missing foreground partner",
                 "missing choir",
             ],
         },
@@ -71,7 +77,7 @@ def _item(native):
             ),
             "negative_prompt": (
                 "extra limbs, distorted anatomy, jumping, feet leaving the floor, "
-                "missing male dancer, missing female dancer, missing choir"
+                "missing foreground partner, missing choir"
             ),
         },
         "seed_image_analysis": {
@@ -97,14 +103,14 @@ def _bounded_visual(limit):
     return (sentence * ((minimum // len(sentence)) + 2))[:minimum]
 
 
-def _valid_legacy_final_prompt(native):
+def _valid_authoritative_final_prompt(native):
     visual = (
         "Two foreground performers remain fully described inside the cathedral. "
         + native
-    )[:4020]
+    )[:3800]
     prompt = (
         f"{SUBJECT_LOCK_MARKER}\n"
-        "Preserve the female lead dancer, male dance partner, and complete choir.\n\n"
+        "Preserve every visible subject, both foreground partners, and the complete choir.\n\n"
         f"{SEED_IMAGE_DESCRIPTION_MARKER}\n{visual}\n\n"
         f"{AUDIO_TIMING_MARKER}\n"
         "Scene 1 spans 0.00-8.00 seconds at 140.62 BPM; synchronize movement and camera.\n\n"
@@ -115,7 +121,7 @@ def _valid_legacy_final_prompt(native):
         f"{MOTION_MARKER}\n"
         "Maintain continuous grounded paired movement and restrained choir support.\n\n"
         f"{NEGATIVE_MARKER}\n"
-        "missing male dancer, missing female dancer, missing choir, jumping, extra limbs"
+        "missing foreground partner, missing choir, jumping, extra limbs"
     )
     return prompt[:4980]
 
@@ -124,8 +130,6 @@ def test_gemma_receives_exact_description_budget_before_generation():
     native = _native_analysis()
     probe = FakeClient([""])
 
-    # First call intentionally uses an empty response so the raised error preserves
-    # the generated request for inspection.
     try:
         synthesize_final_ltx_prompt(_item(native), client=probe, max_attempts=1)
     except ValueError:
@@ -166,6 +170,7 @@ def test_bounded_gemma_description_is_inserted_verbatim():
     assert result["description_char_limit_given_before_generation"] == exact_limit
     assert result["description_modified_after_generation"] is False
     assert result["final_prompt_char_count"] <= 5000
+    assert result["final_prompt"].startswith(SUBJECT_LOCK_MARKER)
     assert f"{SEED_IMAGE_DESCRIPTION_MARKER}\n{visual}\n\n{AUDIO_TIMING_MARKER}" in result[
         "final_prompt"
     ]
@@ -203,22 +208,23 @@ def test_over_limit_visual_response_retries_with_same_predeclared_limit():
     assert f"no more than {exact_limit} characters" in client.calls[1]["user"]
 
 
-def test_legacy_full_prompt_response_remains_compatible():
+def test_full_prompt_response_is_rejected_instead_of_accepted_as_legacy():
     native = _native_analysis()
-    expected = _valid_legacy_final_prompt(native)
-    client = FakeClient([expected])
+    full_prompt = _valid_authoritative_final_prompt(native)
+    client = FakeClient([full_prompt])
 
-    result = synthesize_final_ltx_prompt(_item(native), client=client, max_chars=5000)
-
-    assert result["status"] == "complete"
-    assert result["mode"] == "legacy_full_prompt_compatibility"
-    assert result["final_prompt"] == expected
-    assert result["final_prompt_char_count"] <= 5000
+    with pytest.raises(ValueError, match="forbidden control marker"):
+        synthesize_final_ltx_prompt(
+            _item(native),
+            client=client,
+            max_chars=5000,
+            max_attempts=1,
+        )
 
 
 def test_compact_item_uses_gemma_synthesis_as_exact_ltx_payload(monkeypatch):
     native = _native_analysis()
-    expected = _valid_legacy_final_prompt(native)
+    expected = _valid_authoritative_final_prompt(native)
     visual = "Detailed synthesized visual description. " * 100
 
     def fake_synthesis(item, **kwargs):
