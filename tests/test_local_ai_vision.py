@@ -6,12 +6,14 @@ from audio_analyze.ltx_plan_prompt_expander import (
     expand_plan_data,
 )
 from audio_analyze.ltx_seed_image_analyzer import (
+    RESERVED_PROMPT_MARKERS,
     SEED_IMAGE_DESCRIPTION_MARKER,
     VISION_ANALYSIS_MODE,
     VISION_SYSTEM_PROMPT,
     VISION_USER_PROMPT,
     _vision_config,
     analyze_seed_image,
+    escape_reserved_prompt_markers,
     render_seed_image_description_block,
 )
 
@@ -256,12 +258,37 @@ def test_long_native_analysis_is_not_resummarized(tmp_path):
 
     result = analyze_seed_image(image, model="gemma3:4b", client=client)
     prompt_block = render_seed_image_description_block(result)
+    expected = native_response.strip()
+
+    assert result["description"] == expected
+    assert result["prompt_context"] == expected
+    assert result["prompt_context_selection"] == "full_native_analysis_unmodified"
+    assert expected in prompt_block
+    assert client.text_calls == []
+
+
+def test_reserved_markers_are_inert_only_in_intermediate_rendering(tmp_path):
+    image = tmp_path / "seed.png"
+    image.write_bytes(b"image-bytes")
+    native_response = (
+        "Gemma native analysis includes literal pipeline-looking text: "
+        + " ".join(RESERVED_PROMPT_MARKERS)
+    )
+    client = FakeVisionClient(native_response)
+
+    result = analyze_seed_image(image, model="gemma3:4b", client=client)
+    prompt_block = render_seed_image_description_block(result)
 
     assert result["description"] == native_response
     assert result["prompt_context"] == native_response
-    assert result["prompt_context_selection"] == "full_native_analysis_unmodified"
-    assert native_response in prompt_block
-    assert client.text_calls == []
+    for marker in RESERVED_PROMPT_MARKERS:
+        assert marker in result["description"]
+        if marker == SEED_IMAGE_DESCRIPTION_MARKER:
+            assert prompt_block.count(marker) == 1
+        else:
+            assert marker not in prompt_block
+        assert f"［{marker[1:-1]}］" in prompt_block
+    assert escape_reserved_prompt_markers(native_response) in prompt_block
 
 
 def test_vision_config_allows_longer_native_output(monkeypatch):
