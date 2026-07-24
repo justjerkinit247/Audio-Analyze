@@ -35,6 +35,7 @@ DEFAULT_MAX_CHARS = 5000
 DEFAULT_TARGET_CHARS = 4800
 FOREGROUND_ONSET_DEADLINE_SECONDS = 0.10
 FOREGROUND_PRIORITY_WINDOW_SECONDS = 0.50
+GEMMA_PIPELINE_POLICY_VERSION = "gemma_visual_then_existing_pipeline_v2"
 
 FOREGROUND_ONSET_NEGATIVE_TERMS = [
     "frozen foreground subjects",
@@ -143,6 +144,11 @@ def _truncate_at_boundary(text: str, limit: int) -> str:
 
 
 def _compact_prefix(item: dict[str, Any]) -> str:
+    # Live Gemma scenes must still start with the established Python-owned marker
+    # envelope. Offline/template fallback scenes retain the legacy context prefix.
+    if item.get("gemma_pipeline_integration"):
+        return ""
+
     filename = (
         item.get("seed_filename_used_for_prompt_hint")
         or Path(str(item.get("seed_image_used") or "seed_image.png")).name
@@ -245,9 +251,10 @@ def _compact_tap_sync(item: dict[str, Any], existing: str) -> str:
 
     return (
         f"Primary tap-accent times inside this clip: {targets}. {onset}"
-        "Use clap, snare, hi-hat, and sharp high-frequency accents as controlled "
-        "visible action triggers. Ignore bass-only boom hits and maintain coherent "
-        "foreground motion between accents."
+        "Use sharp clap, snare, hi-hat, and similar high-frequency accents as controlled "
+        "visible action triggers. Land controlled visible action changes on each listed "
+        "tap accent. Ignore bass-only boom hits and maintain coherent foreground motion "
+        "between accents."
     )
 
 
@@ -264,8 +271,20 @@ def _split_negative_terms(text: str) -> list[str]:
 
 def _negative_terms(item: dict[str, Any], existing: str) -> list[str]:
     expansion = item.get("filename_hint_expansion") or {}
+    choreography = item.get("choreography_policy") or {}
+    subject = item.get("subject_count_policy") or {}
     raw_terms = _split_negative_terms(str(expansion.get("negative_prompt") or ""))
     raw_terms.extend(_split_negative_terms(existing))
+    raw_terms.extend(
+        _clean_inline(value)
+        for value in choreography.get("negative_terms") or []
+        if _clean_inline(value)
+    )
+    raw_terms.extend(
+        _clean_inline(value)
+        for value in subject.get("negative_terms") or []
+        if _clean_inline(value)
+    )
     raw_terms.extend(FOREGROUND_ONSET_NEGATIVE_TERMS)
 
     seen: set[str] = set()
@@ -328,54 +347,17 @@ def _freeform_gemma_analysis(item: dict[str, Any]) -> bool:
     )
 
 
-def _apply_gemma_synthesis(
-    item: dict[str, Any],
-    *,
-    max_chars: int,
-) -> dict[str, Any]:
-    patched = deepcopy(item)
-    synthesis = synthesize_final_ltx_prompt(
-        patched,
-        max_chars=max_chars,
-        target_min=min(4700, max_chars - 250),
-        target_max=min(4980, max_chars),
+def _pipeline_visual_description(item: dict[str, Any], parsed: dict[str, str]) -> str:
+    analysis = item.get("seed_image_analysis") or {}
+    synthesis = item.get("gemma_final_prompt_synthesis") or {}
+    return _clean_inline(
+        analysis.get("pipeline_visual_description")
+        or synthesis.get("seed_description")
+        or analysis.get("description")
+        or analysis.get("prompt_context")
+        or parsed.get(SEED_IMAGE_DESCRIPTION_MARKER)
+        or ""
     )
-    final_prompt = synthesis["final_prompt"]
-    analysis = deepcopy(patched.get("seed_image_analysis") or {})
-    analysis["prompt_context"] = final_prompt
-    analysis["prompt_context_char_count"] = len(final_prompt)
-    analysis["prompt_context_selection"] = (
-        "gemma_full_native_analysis_to_final_ltx_prompt"
-    )
-    patched["seed_image_analysis"] = analysis
-    patched["gemma_final_prompt_synthesis"] = synthesis
-    patched["prompt_text_before_gemma_final_synthesis"] = str(
-        item.get("prompt_text") or ""
-    )
-    patched["prompt_text"] = final_prompt
-    patched["exact_prompt_sent_to_ltx"] = final_prompt
-    patched["prompt_text_is_exact_ltx_payload"] = True
-    patched["prompt_text_chars"] = len(final_prompt)
-    patched["prompt_budget"] = {
-        "status": "gemma_synthesized",
-        "before_chars": len(str(item.get("prompt_text") or "")),
-        "after_chars": len(final_prompt),
-        "target_chars": min(4980, max_chars),
-        "hard_limit_chars": max_chars,
-        "preserved_markers": [
-            marker for marker in REQUIRED_MARKERS if marker in final_prompt
-        ],
-        "policy": "gemma_full_native_analysis_final_prompt_synthesis",
-        "policy_version": "gemma_final_ltx_prompt_v1",
-        "seed_analysis_native_chars": synthesis["source_native_analysis_chars"],
-        "seed_analysis_prompt_chars": synthesis["seed_description_char_count"],
-        "seed_analysis_summary_model_used": True,
-        "final_prompt_synthesis_model": synthesis["model"],
-        "final_prompt_synthesis_attempts": synthesis["attempt_count"],
-        "final_prompt_validation_passed": synthesis["validation_passed"],
-        "prompt_text_is_exact_ltx_payload": True,
-    }
-    return patched
 
 
 def _deterministic_compact_item(
@@ -405,13 +387,7 @@ def _deterministic_compact_item(
         NEGATIVE_MARKER: "",
     }
 
-    analysis = item.get("seed_image_analysis") or {}
-    seed_description = _clean_inline(
-        analysis.get("description")
-        or analysis.get("prompt_context")
-        or parsed.get(SEED_IMAGE_DESCRIPTION_MARKER)
-        or ""
-    )
+    seed_description = _pipeline_visual_description(item, parsed)
     if seed_description:
         sections[SEED_IMAGE_DESCRIPTION_MARKER] = seed_description
 
@@ -507,6 +483,102 @@ def _deterministic_compact_item(
     return patched
 
 
+def _apply_gemma_synthesis(
+    item: dict[str, Any],
+    *,
+    max_chars: int,
+    target_chars: int,
+) -> dict[str, Any]:
+    staged = deepcopy(item)
+    synthesis = synthesize_final_ltx_prompt(
+        staged,
+        max_chars=max_chars,
+        target_min=min(4700, max_chars - 250),
+        target_max=min(4980, max_chars),
+    )
+
+    native_analysis = deepcopy(staged.get("seed_image_analysis") or {})
+    original_native_description = str(native_analysis.get("description") or "")
+    visual_description = str(synthesis.get("seed_description") or "").strip()
+    if not visual_description:
+        raise ValueError("Gemma synthesis completed without a seed description.")
+
+    # Preserve the complete native analysis for audit. The existing prompt pipeline
+    # receives only Gemma's distilled visual description as its visual input.
+    native_analysis["native_description"] = original_native_description
+    native_analysis["pipeline_visual_description"] = visual_description
+    native_analysis["pipeline_visual_description_char_count"] = len(visual_description)
+    native_analysis["prompt_context_selection"] = (
+        "gemma_visual_description_then_existing_prompt_pipeline"
+    )
+    staged["seed_image_analysis"] = native_analysis
+    staged["gemma_final_prompt_synthesis"] = deepcopy(synthesis)
+    staged["prompt_text_before_gemma_final_synthesis"] = str(
+        item.get("prompt_text") or ""
+    )
+    staged["prompt_text"] = str(synthesis.get("final_prompt") or "")
+    staged["gemma_pipeline_integration"] = True
+
+    integrated = _deterministic_compact_item(
+        staged,
+        max_chars=max_chars,
+        target_chars=target_chars,
+    )
+    final_prompt = str(integrated["prompt_text"])
+
+    analysis = deepcopy(integrated.get("seed_image_analysis") or {})
+    analysis["description"] = original_native_description
+    analysis["prompt_context"] = final_prompt
+    analysis["prompt_context_char_count"] = len(final_prompt)
+    analysis["prompt_context_selection"] = (
+        "gemma_visual_description_then_existing_prompt_pipeline"
+    )
+    integrated["seed_image_analysis"] = analysis
+
+    synthesis_metadata = deepcopy(integrated.get("gemma_final_prompt_synthesis") or {})
+    synthesis_metadata["visual_stage_final_prompt"] = synthesis_metadata.get("final_prompt")
+    synthesis_metadata["visual_stage_final_prompt_char_count"] = synthesis_metadata.get(
+        "final_prompt_char_count"
+    )
+    synthesis_metadata["final_prompt"] = final_prompt
+    synthesis_metadata["final_prompt_char_count"] = len(final_prompt)
+    synthesis_metadata["mode"] = (
+        "gemma_bounded_visual_description_existing_pipeline_envelope"
+    )
+    synthesis_metadata["pipeline_integration_applied"] = True
+    synthesis_metadata["pipeline_integration_policy_version"] = (
+        GEMMA_PIPELINE_POLICY_VERSION
+    )
+    integrated["gemma_final_prompt_synthesis"] = synthesis_metadata
+
+    budget = deepcopy(integrated.get("prompt_budget") or {})
+    budget.update(
+        {
+            "status": "gemma_synthesized",
+            "before_chars": len(str(item.get("prompt_text") or "")),
+            "after_chars": len(final_prompt),
+            "target_chars": int(target_chars),
+            "hard_limit_chars": int(max_chars),
+            "policy": "gemma_visual_analysis_then_existing_prompt_pipeline",
+            "policy_version": GEMMA_PIPELINE_POLICY_VERSION,
+            "foreground_motion_onset_enforced": True,
+            "seed_analysis_native_chars": synthesis["source_native_analysis_chars"],
+            "seed_analysis_prompt_chars": synthesis["seed_description_char_count"],
+            "seed_analysis_summary_model_used": True,
+            "final_prompt_synthesis_model": synthesis["model"],
+            "final_prompt_synthesis_attempts": synthesis["attempt_count"],
+            "final_prompt_validation_passed": synthesis["validation_passed"],
+            "pipeline_integration_applied": True,
+            "prompt_text_is_exact_ltx_payload": True,
+        }
+    )
+    integrated["prompt_budget"] = budget
+    integrated["exact_prompt_sent_to_ltx"] = final_prompt
+    integrated["prompt_text_is_exact_ltx_payload"] = True
+    integrated["prompt_text_chars"] = len(final_prompt)
+    return integrated
+
+
 def compact_item_prompt(
     item: dict[str, Any],
     *,
@@ -517,7 +589,11 @@ def compact_item_prompt(
     target = min(hard_limit, max(1, int(target_chars)))
 
     if _freeform_gemma_analysis(item):
-        return _apply_gemma_synthesis(item, max_chars=hard_limit)
+        return _apply_gemma_synthesis(
+            item,
+            max_chars=hard_limit,
+            target_chars=target,
+        )
 
     return _deterministic_compact_item(
         item,
@@ -560,8 +636,8 @@ def compact_plan_prompts(
         "max_before_chars": max(before_lengths) if before_lengths else 0,
         "max_after_chars": max(after_lengths) if after_lengths else 0,
         "gemma_final_prompt_synthesis_scene_count": synthesis_count,
-        "policy": "gemma_synthesis_for_freeform_analysis_else_deterministic_compaction",
-        "policy_version": "gemma_final_ltx_prompt_v1",
+        "policy": "gemma_visual_analysis_integrated_with_existing_compaction",
+        "policy_version": GEMMA_PIPELINE_POLICY_VERSION,
         "foreground_motion_onset_enforced": True,
     }
     return patched
