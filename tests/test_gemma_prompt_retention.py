@@ -224,9 +224,9 @@ def test_full_prompt_response_is_rejected_instead_of_accepted_as_legacy():
         )
 
 
-def test_compact_item_uses_gemma_synthesis_as_exact_ltx_payload(monkeypatch):
+def test_compact_item_routes_gemma_visual_through_existing_pipeline(monkeypatch):
     native = _native_analysis()
-    expected = _valid_authoritative_final_prompt(native)
+    visual_stage_prompt = _valid_authoritative_final_prompt(native)
     visual = "Detailed synthesized visual description. " * 100
 
     def fake_synthesis(item, **kwargs):
@@ -236,8 +236,8 @@ def test_compact_item_uses_gemma_synthesis_as_exact_ltx_payload(monkeypatch):
             "model": "gemma3:4b",
             "mode": "gemma_bounded_visual_description_python_envelope",
             "source_native_analysis_chars": len(native),
-            "final_prompt": expected,
-            "final_prompt_char_count": len(expected),
+            "final_prompt": visual_stage_prompt,
+            "final_prompt_char_count": len(visual_stage_prompt),
             "seed_description": visual,
             "seed_description_char_count": len(visual),
             "description_char_limit_given_before_generation": len(visual) + 200,
@@ -266,12 +266,24 @@ def test_compact_item_uses_gemma_synthesis_as_exact_ltx_payload(monkeypatch):
     )
 
     compacted = prompt_budget.compact_item_prompt(_item(native))
+    final_prompt = compacted["prompt_text"]
 
-    assert compacted["prompt_text"] == expected
-    assert compacted["exact_prompt_sent_to_ltx"] == expected
+    assert final_prompt != visual_stage_prompt
+    assert final_prompt.startswith(SUBJECT_LOCK_MARKER)
+    assert compacted["exact_prompt_sent_to_ltx"] == final_prompt
     assert compacted["prompt_text_is_exact_ltx_payload"] is True
-    assert compacted["prompt_text_chars"] == len(expected)
+    assert compacted["prompt_text_chars"] == len(final_prompt)
     assert compacted["seed_image_analysis"]["description"] == native
+    assert compacted["seed_image_analysis"]["pipeline_visual_description"] == visual
     assert compacted["gemma_final_prompt_synthesis"]["seed_description"] == visual
+    assert compacted["gemma_final_prompt_synthesis"]["visual_stage_final_prompt"] == visual_stage_prompt
+    assert compacted["gemma_final_prompt_synthesis"]["final_prompt"] == final_prompt
     assert compacted["prompt_budget"]["status"] == "gemma_synthesized"
     assert compacted["prompt_budget"]["seed_analysis_summary_model_used"] is True
+    assert compacted["prompt_budget"]["pipeline_integration_applied"] is True
+    assert compacted["foreground_motion_onset"]["deadline_seconds"] == 0.10
+    assert "depart the seed pose by 0.10 seconds" in final_prompt
+    assert "The first tap is an accent, not the start signal" in final_prompt
+    assert "frozen foreground subjects" in final_prompt
+    assert "moving background hands while foreground remains frozen" in final_prompt
+    assert "Detailed synthesized visual description" in final_prompt
