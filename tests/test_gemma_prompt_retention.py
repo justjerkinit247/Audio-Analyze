@@ -274,7 +274,7 @@ def test_compact_item_routes_gemma_visual_through_existing_pipeline(monkeypatch)
     assert compacted["prompt_text_is_exact_ltx_payload"] is True
     assert compacted["prompt_text_chars"] == len(final_prompt)
     assert compacted["seed_image_analysis"]["description"] == native
-    assert compacted["seed_image_analysis"]["pipeline_visual_description"] == visual
+    assert compacted["seed_image_analysis"]["pipeline_visual_description"] == visual.strip()
     assert compacted["gemma_final_prompt_synthesis"]["seed_description"] == visual
     assert compacted["gemma_final_prompt_synthesis"]["visual_stage_final_prompt"] == visual_stage_prompt
     assert compacted["gemma_final_prompt_synthesis"]["final_prompt"] == final_prompt
