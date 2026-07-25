@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import builtins
 
-from . import ltx_live_run
+from . import ltx_multi_scene_live_run as ltx_live_run
 
 
 _ORIGINAL_INPUT = builtins.input
