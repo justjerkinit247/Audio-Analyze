@@ -10,6 +10,9 @@ from . import ltx_multi_scene_live_run as base
 from .ltx_seed_mapper import ALLOWED_IMAGES, scene_number_from_name
 
 
+DEFAULT_GUIDANCE_SCALE = 12.0
+
+
 def _choose_seed_files(title: str, initial_dir: Path) -> list[Path]:
     try:
         import tkinter as tk
@@ -156,7 +159,9 @@ def run_interactive(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    return base.build_parser()
+    parser = base.build_parser()
+    parser.set_defaults(guidance_scale=DEFAULT_GUIDANCE_SCALE)
+    return parser
 
 
 def main() -> None:
