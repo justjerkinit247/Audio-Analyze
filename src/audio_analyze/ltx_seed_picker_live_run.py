@@ -111,7 +111,7 @@ def _ordered_selected_seed_files(
 
 
 def _copy_selected_for_pipeline(selected: list[Path], destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=False)
+    destination.mkdir(parents=True, exist_ok=True)
     for index, source in enumerate(selected, start=1):
         scene_number = scene_number_from_name(source)
         filename = source.name
