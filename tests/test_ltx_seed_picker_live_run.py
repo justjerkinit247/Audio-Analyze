@@ -35,3 +35,13 @@ def test_single_unlabeled_seed_remains_backward_compatible(tmp_path):
     seed = _touch(tmp_path / "choir.png")
 
     assert picker._ordered_selected_seed_files([seed], None) == [seed]
+
+
+def test_copy_selected_accepts_precreated_temporary_directory(tmp_path):
+    seed = _touch(tmp_path / "source" / "scene_01_front.png")
+    destination = tmp_path / "already_created"
+    destination.mkdir()
+
+    picker._copy_selected_for_pipeline([seed], destination)
+
+    assert (destination / seed.name).read_bytes() == b"seed"
