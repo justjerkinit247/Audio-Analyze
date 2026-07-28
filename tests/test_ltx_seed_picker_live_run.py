@@ -45,3 +45,9 @@ def test_copy_selected_accepts_precreated_temporary_directory(tmp_path):
     picker._copy_selected_for_pipeline([seed], destination)
 
     assert (destination / seed.name).read_bytes() == b"seed"
+
+
+def test_live_pipeline_defaults_guidance_scale_to_twelve():
+    args = picker.build_parser().parse_args([])
+
+    assert args.guidance_scale == 12.0
