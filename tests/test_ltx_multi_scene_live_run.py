@@ -48,3 +48,4 @@ def test_parser_defaults_to_seed_count_and_auto_resolution():
 
     assert args.max_scenes is None
     assert args.resolution == "auto"
+    assert args.asmo_max_events_per_scene == 8

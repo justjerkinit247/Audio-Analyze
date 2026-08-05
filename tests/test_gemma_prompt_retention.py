@@ -287,3 +287,41 @@ def test_compact_item_routes_gemma_visual_through_existing_pipeline(monkeypatch)
     assert "frozen foreground subjects" in final_prompt
     assert "moving background hands while foreground remains frozen" in final_prompt
     assert "Detailed synthesized visual description" in final_prompt
+
+
+def test_compact_item_preserves_exact_asmo_block_inside_motion_section(monkeypatch):
+    native = _native_analysis()
+    visual = "Detailed synthesized visual description. " * 80
+    asmo_block = (
+        "TIMED ASMO MOTION DIRECTIVES: "
+        "- +0.500s: perform controlled hip isolation synchronized tightly to rhythm; "
+        "camera=waist_tracking; lyric='twerk'; "
+        "- +1.500s: drop low with strong synchronized hip-driven motion; "
+        "camera=downward_follow; lyric='drop low'"
+    )
+
+    def fake_synthesis(item, **kwargs):
+        return {
+            "status": "complete",
+            "provider": "ollama",
+            "model": "gemma3:4b",
+            "source_native_analysis_chars": len(native),
+            "final_prompt": "visual-stage-placeholder",
+            "final_prompt_char_count": 24,
+            "seed_description": visual,
+            "seed_description_char_count": len(visual),
+            "attempt_count": 1,
+            "validation_passed": True,
+        }
+
+    monkeypatch.setattr(prompt_budget, "synthesize_final_ltx_prompt", fake_synthesis)
+    item = _item(native)
+    item["asmo_motion_prompt_block"] = asmo_block
+
+    compacted = prompt_budget.compact_item_prompt(item)
+    motion = compacted["prompt_text"].split(MOTION_MARKER, 1)[1].split(
+        NEGATIVE_MARKER, 1
+    )[0]
+
+    assert asmo_block in " ".join(motion.split())
+    assert compacted["exact_prompt_sent_to_ltx"] == compacted["prompt_text"]

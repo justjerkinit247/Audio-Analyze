@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -37,25 +38,27 @@ def _offset_timeline_events(timeline: dict[str, Any], offset_ms: int) -> dict[st
     return shifted
 
 
-def inject_asmo_into_ltx_run_plan(
-    plan_json: str | Path,
+def apply_asmo_timeline_to_plan_data(
+    plan: dict[str, Any],
     lyric_path: str | Path,
-    output_json: str | Path | None = None,
     max_events_per_scene: int = 8,
     start_offset_seconds: float = 0.0,
+    engine: ASMOEngine | None = None,
 ) -> dict[str, Any]:
-    """Inject ASMO timing directives into an existing LTX run plan.
+    """Attach ASMO timing directives to in-memory LTX scene data.
 
     `start_offset_seconds` shifts lyric/ASMO event timestamps into the same absolute
     source-audio window used by the LTX scene plan. Example: if the run starts at
     01:26, pass 86.0 so relative lyric timestamps align to scenes starting at 86s.
     """
-    plan_path = Path(plan_json)
-    plan = read_json(plan_path)
-    engine = ASMOEngine()
+    if int(max_events_per_scene) < 1:
+        raise ValueError("max_events_per_scene must be at least 1.")
+
+    patched = deepcopy(plan)
+    active_engine = engine or ASMOEngine()
     offset_ms = int(round(float(start_offset_seconds or 0.0) * 1000.0))
 
-    results = plan.get("results", [])
+    results = patched.get("results", [])
     if not isinstance(results, list):
         raise ValueError("LTX plan JSON must contain a list field named 'results'.")
 
@@ -80,7 +83,7 @@ def inject_asmo_into_ltx_run_plan(
 
         cache_key = str(audio_path_obj.resolve())
         if cache_key not in timeline_cache:
-            raw_timeline = engine.generate_timeline(
+            raw_timeline = active_engine.generate_timeline(
                 lyric_path=lyric_path,
                 audio_path=audio_path_obj,
             )
@@ -104,26 +107,51 @@ def inject_asmo_into_ltx_run_plan(
             item["asmo_start_offset_seconds"] = float(start_offset_seconds or 0.0)
             continue
 
-        base_prompt = item.get("prompt_text", "").strip()
-        if "TIMED ASMO MOTION DIRECTIVES:" in base_prompt:
-            base_prompt = base_prompt.split("TIMED ASMO MOTION DIRECTIVES:", 1)[0].strip()
-
         block = build_ltx_motion_directive_block(
             events=scene_events,
             start_ms=start_ms,
         )
 
-        item["base_prompt_text_before_asmo"] = item.get("base_prompt_text_before_asmo") or base_prompt
         item["asmo_injection_status"] = "injected"
         item["asmo_schema"] = timeline.get("schema")
         item["asmo_motion_event_count"] = len(scene_events)
         item["asmo_motion_events"] = scene_events
+        item["asmo_motion_prompt_block"] = block
         item["asmo_start_offset_seconds"] = float(start_offset_seconds or 0.0)
-        item["prompt_text"] = f"{base_prompt}\n\n{block}".strip()
 
-    plan["asmo_ltx_run_integration"] = True
-    plan["asmo_lyric_path"] = str(Path(lyric_path))
-    plan["asmo_start_offset_seconds"] = float(start_offset_seconds or 0.0)
+    patched["asmo_ltx_run_integration"] = True
+    patched["asmo_lyric_path"] = str(Path(lyric_path))
+    patched["asmo_start_offset_seconds"] = float(start_offset_seconds or 0.0)
+    return patched
+
+
+def inject_asmo_into_ltx_run_plan(
+    plan_json: str | Path,
+    lyric_path: str | Path,
+    output_json: str | Path | None = None,
+    max_events_per_scene: int = 8,
+    start_offset_seconds: float = 0.0,
+) -> dict[str, Any]:
+    """Inject ASMO timing directives into an existing LTX run-plan JSON file."""
+    plan_path = Path(plan_json)
+    plan = apply_asmo_timeline_to_plan_data(
+        read_json(plan_path),
+        lyric_path=lyric_path,
+        max_events_per_scene=max_events_per_scene,
+        start_offset_seconds=start_offset_seconds,
+    )
+
+    for item in plan.get("results", []):
+        if not isinstance(item, dict) or item.get("asmo_injection_status") != "injected":
+            continue
+        base_prompt = str(item.get("prompt_text") or "").strip()
+        if "TIMED ASMO MOTION DIRECTIVES:" in base_prompt:
+            base_prompt = base_prompt.split("TIMED ASMO MOTION DIRECTIVES:", 1)[0].strip()
+        block = str(item.get("asmo_motion_prompt_block") or "").strip()
+        item["base_prompt_text_before_asmo"] = (
+            item.get("base_prompt_text_before_asmo") or base_prompt
+        )
+        item["prompt_text"] = f"{base_prompt}\n\n{block}".strip()
 
     target = Path(output_json) if output_json else plan_path.with_name(plan_path.stem + "_asmo_injected.json")
     write_json(target, plan)

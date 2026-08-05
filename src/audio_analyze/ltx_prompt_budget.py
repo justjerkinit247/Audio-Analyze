@@ -262,7 +262,13 @@ def _compact_motion(item: dict[str, Any], existing: str, limit: int) -> str:
     expansion = item.get("filename_hint_expansion") or {}
     source = _clean_inline(expansion.get("ltx_motion_prompt") or existing)
     fallback = "Maintain continuous grounded motion and stable camera movement."
-    return _truncate_at_boundary(source or fallback, max(240, limit))
+    asmo_block = _clean_inline(item.get("asmo_motion_prompt_block"))
+    if not asmo_block:
+        return _truncate_at_boundary(source or fallback, max(240, limit))
+
+    base_limit = max(0, int(limit) - len(asmo_block) - 1)
+    base_motion = _truncate_at_boundary(source or fallback, base_limit)
+    return f"{base_motion} {asmo_block}".strip()
 
 
 def _split_negative_terms(text: str) -> list[str]:
@@ -396,6 +402,9 @@ def _deterministic_compact_item(
     available = max(700, target_chars - len(fixed_without_motion_negative))
     negative_limit = min(1150, max(720, int(available * 0.46)))
     motion_limit = max(420, available - negative_limit)
+    asmo_block = _clean_inline(item.get("asmo_motion_prompt_block"))
+    if asmo_block:
+        motion_limit = max(motion_limit, len(asmo_block) + 240)
 
     sections[MOTION_MARKER] = _compact_motion(
         item,

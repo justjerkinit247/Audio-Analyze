@@ -219,6 +219,39 @@ def _validate_gemma_exact_payload(scene: dict[str, Any], problems: list[str]) ->
     return prompt
 
 
+def _validate_asmo_exact_payload(
+    plan: dict[str, Any],
+    scene: dict[str, Any],
+    prompt: str,
+    problems: list[str],
+) -> None:
+    if plan.get("asmo_ltx_run_integration") is not True:
+        problems.append("full ASMO timeline integration is not enabled")
+    if scene.get("asmo_injection_status") != "injected":
+        problems.append(
+            "ASMO timeline was not injected into this scene "
+            f"(status={scene.get('asmo_injection_status')!r})"
+        )
+
+    events = list(scene.get("asmo_motion_events") or [])
+    event_count = scene.get("asmo_motion_event_count")
+    if not events or event_count != len(events):
+        problems.append("ASMO scene event metadata is empty or inconsistent")
+
+    block = " ".join(str(scene.get("asmo_motion_prompt_block") or "").split())
+    motion_section = " ".join(
+        _section_between(prompt, "[MOTION_PROMPT]", "[NEGATIVE_PROMPT]").split()
+    )
+    if not block.startswith("TIMED ASMO MOTION DIRECTIVES:"):
+        problems.append("ASMO timed motion directive block is missing")
+    elif block.count("- +") != len(events):
+        problems.append("ASMO timed directive count does not match scene event metadata")
+    elif block not in motion_section:
+        problems.append(
+            "the exact ASMO timed directive block is not inside [MOTION_PROMPT]"
+        )
+
+
 def _validate_plan(
     plan: dict[str, Any],
     report: dict[str, Any],
@@ -241,6 +274,7 @@ def _validate_plan(
 
     if scene:
         prompt = _validate_gemma_exact_payload(scene, problems)
+        _validate_asmo_exact_payload(plan, scene, prompt, problems)
         if scene.get("seed_filename_used_for_prompt_hint") != seed_filename:
             problems.append("Ollama did not receive the exact seed filename")
         if scene.get("prompt_transport_mode") != "audio_and_image_to_video":
@@ -326,6 +360,14 @@ def run_interactive(args: argparse.Namespace) -> int:
     if not seed.is_file():
         raise FileNotFoundError(f"Seed image not found: {seed}")
 
+    lyrics = Path(args.lyrics).expanduser().resolve() if args.lyrics else _choose_file(
+        "Select the TXT or LRC lyrics for ASMO timing",
+        [("Lyric files", "*.txt *.lrc"), ("All files", "*.*")],
+        repo / "inputs" / "lyrics",
+    )
+    if not lyrics.is_file():
+        raise FileNotFoundError(f"Lyric file not found: {lyrics}")
+
     start_offset = args.start if args.start is not None else _ask_start_offset(0.0)
     if start_offset < 0:
         raise ValueError("Audio starting second cannot be negative.")
@@ -341,6 +383,7 @@ def run_interactive(args: argparse.Namespace) -> int:
     print("\nBuilding a brand-new isolated plan...")
     print(f"Run ID: {paths.run_id}")
     print(f"Audio: {audio.name}")
+    print(f"ASMO lyrics: {lyrics.name}")
     print(f"Seed: {seed.name}")
     print(f"Choreography policy request: {requested_profile}")
 
@@ -361,6 +404,9 @@ def run_interactive(args: argparse.Namespace) -> int:
             guidance_scale=args.guidance_scale,
             filename_hint_provider="ollama",
             filename_hint_model=args.ollama_model,
+            apply_asmo_timeline=True,
+            asmo_lyric_path=lyrics,
+            asmo_max_events_per_scene=args.asmo_max_events_per_scene,
             allow_sorted_seed_fallback=True,
             live=False,
         )
@@ -387,6 +433,8 @@ def run_interactive(args: argparse.Namespace) -> int:
     print("\n================ PLAN READY ================")
     print(f"Prompt length: {len(prompt)} / 5000")
     print("Gemma exact payload verified: YES")
+    print("Full ASMO timeline verified: YES")
+    print(f"ASMO event count: {scene.get('asmo_motion_event_count')}")
     print(f"Gemma model: {synthesis.get('model')}")
     print(f"Gemma synthesis attempts: {synthesis.get('attempt_count')}")
     print(f"Choreography profile: {policy.get('profile_id') or scene.get('tap_motion_profile')}")
@@ -438,6 +486,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--audio", default=None, help="Optional source audio path.")
     parser.add_argument("--seed", default=None, help="Optional seed image path.")
+    parser.add_argument("--lyrics", default=None, help="Optional TXT or LRC lyric path.")
+    parser.add_argument("--asmo-max-events-per-scene", type=int, default=8)
     parser.add_argument("--start", type=float, default=None, help="Audio starting second.")
     parser.add_argument("--scene-seconds", type=float, default=DEFAULT_SCENE_SECONDS)
     parser.add_argument("--model", default=DEFAULT_MODEL)

@@ -95,54 +95,76 @@ def clip_index_from_name(path: Path) -> int | None:
 def load_clip_plans(run_dir: Path) -> dict[int, dict[str, Any]]:
     plans: dict[int, dict[str, Any]] = {}
     clip_plan_dir = run_dir / "clip_plans"
-    if not clip_plan_dir.exists():
-        return plans
-    for path in sorted(clip_plan_dir.glob("scene_*_clip_plan.json")):
-        try:
-            plan = read_json(path)
-        except Exception as exc:
-            idx = clip_index_from_name(path)
+    if clip_plan_dir.exists():
+        for path in sorted(clip_plan_dir.glob("scene_*_clip_plan.json")):
+            try:
+                plan = read_json(path)
+            except Exception as exc:
+                idx = clip_index_from_name(path)
+                if idx is None:
+                    continue
+                plans[idx] = {
+                    "clip_index": idx,
+                    "clip_plan_path": path,
+                    "clip_plan_read_error": str(exc),
+                }
+                continue
+            idx = as_float(plan.get("clip_index"))
+            if idx is None:
+                idx = clip_index_from_name(path)
             if idx is None:
                 continue
-            plans[idx] = {
-                "clip_index": idx,
-                "clip_plan_path": path,
-                "clip_plan_read_error": str(exc),
-            }
-            continue
-        idx = as_float(plan.get("clip_index"))
-        if idx is None:
-            idx = clip_index_from_name(path)
-        if idx is None:
-            continue
-        plan["clip_plan_path"] = path
-        plans[int(idx)] = plan
+            plan["clip_plan_path"] = path
+            plans[int(idx)] = plan
+
+    validated_plan_path = run_dir / "validated_plan.json"
+    if validated_plan_path.exists():
+        try:
+            validated_plan = read_json(validated_plan_path)
+        except Exception:
+            validated_plan = {}
+        for item in validated_plan.get("results", []) or []:
+            idx = as_float(item.get("clip_index"))
+            if idx is None or int(idx) in plans:
+                continue
+            plan = dict(item)
+            plan["clip_plan_path"] = validated_plan_path
+            plans[int(idx)] = plan
     return plans
 
 
 def load_submit_clip_paths(run_dir: Path) -> dict[int, dict[str, Any]]:
-    summary_path = run_dir / "submissions" / "ltx_submit_all_summary.json"
-    if not summary_path.exists():
-        return {}
-    try:
-        summary = read_json(summary_path)
-    except Exception:
-        return {}
     by_clip: dict[int, dict[str, Any]] = {}
-    for item in summary.get("results", []):
-        idx = as_float(item.get("clip_index"))
-        if idx is None:
+    summaries = (
+        (
+            run_dir / "submissions" / "ltx_submit_all_summary.json",
+            "submit_summary.downloaded_mp4",
+        ),
+        (run_dir / "live_result.json", "live_result.downloaded_mp4"),
+    )
+    for summary_path, source in summaries:
+        if not summary_path.exists():
             continue
-        clip_path = resolve_artifact_path(
-            item.get("downloaded_mp4") or item.get("downloaded_mp4_resolved_path"),
-            run_dir,
+        try:
+            summary = read_json(summary_path)
+        except Exception:
+            continue
+        items = summary.get("results") or (
+            [summary] if summary.get("clip_index") is not None else []
         )
-        by_clip[int(idx)] = {
-            "clip_path": clip_path,
-            "source": "submit_summary.downloaded_mp4",
-            "raw_path": item.get("downloaded_mp4") or item.get("downloaded_mp4_resolved_path"),
-            "result": item,
-        }
+        for item in items:
+            idx = as_float(item.get("clip_index"))
+            if idx is None or int(idx) in by_clip:
+                continue
+            raw_path = item.get("downloaded_mp4") or item.get(
+                "downloaded_mp4_resolved_path"
+            )
+            by_clip[int(idx)] = {
+                "clip_path": resolve_artifact_path(raw_path, run_dir),
+                "source": source,
+                "raw_path": raw_path,
+                "result": item,
+            }
     return by_clip
 
 
@@ -196,6 +218,9 @@ def locate_clip(clip_index: int, submit_paths: dict[int, dict[str, Any]], manife
 def cue_times_from_plan(plan: dict[str, Any]) -> list[float]:
     sync_targets = plan.get("sync_targets", {}) if isinstance(plan.get("sync_targets"), dict) else {}
     raw = sync_targets.get("clip_local_seconds") or []
+    if not raw:
+        tap_sync = plan.get("tap_sync", {}) if isinstance(plan.get("tap_sync"), dict) else {}
+        raw = tap_sync.get("primary_sync_targets_relative_seconds") or []
     times: list[float] = []
     for value in raw:
         parsed = as_float(value)
@@ -608,7 +633,10 @@ def analyze_scene(
                 "cue_time_adjustment_seconds": 0.0,
             }
         )
-        base["notes"].append("No sync_targets.clip_local_seconds cues were found.")
+        base["notes"].append(
+            "No sync_targets.clip_local_seconds or "
+            "tap_sync.primary_sync_targets_relative_seconds cues were found."
+        )
         base["notes"].append("Simple calibration is not reliable for bad scenes.")
         return base
 

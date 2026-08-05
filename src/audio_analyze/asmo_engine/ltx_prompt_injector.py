@@ -5,6 +5,13 @@ from pathlib import Path
 from typing import Any
 
 
+def _prompt_safe_inline(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 3)].rstrip() + "..."
+
+
 def read_json(path: str | Path) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
@@ -26,10 +33,17 @@ def build_ltx_motion_directive_block(
         absolute_ms = int(event.get("timestamp_ms", 0))
         relative_ms = max(0, absolute_ms - int(start_ms))
         seconds = relative_ms / 1000.0
-        lyric = str(event.get("lyric", "")).strip()
+        lyric = _prompt_safe_inline(event.get("lyric", ""), 80)
         directive = event.get("motion_directive", {}) or {}
-        motion = directive.get("prompt_fragment") or "sync movement tightly to lyric and beat"
-        camera = directive.get("camera_behavior") or "steady_tracking"
+        motion = _prompt_safe_inline(
+            directive.get("prompt_fragment")
+            or "sync movement tightly to lyric and beat",
+            140,
+        )
+        camera = _prompt_safe_inline(
+            directive.get("camera_behavior") or "steady_tracking",
+            60,
+        )
 
         lines.append(
             f"- +{seconds:0.3f}s: {motion}; camera={camera}; lyric='{lyric}'"
