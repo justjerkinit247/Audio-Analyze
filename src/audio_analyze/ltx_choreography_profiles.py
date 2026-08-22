@@ -210,7 +210,6 @@ def _apply_context_variant(
     ]
     selected["required_prompt_phrases"] = [
         "compact localized twerk pulse",
-        "seed image's actual support and body contact",
         "do not invent planted-foot or heel-down constraints",
         "seed-image description confirms it is visibly present",
     ]
@@ -297,7 +296,7 @@ def resolve_choreography_profile(
     }
 
 
-def target_limit_for_policy(policy: dict[str, Any]) -> int | None:
+def target_limit_for_policy(policy: dict[str,Any]) -> int | None:
     selection = policy.get("target_selection") or {}
     mode = str(selection.get("mode") or "all_reliable")
     if mode == "all_reliable":
