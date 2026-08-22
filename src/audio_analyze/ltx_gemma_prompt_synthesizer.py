@@ -46,6 +46,15 @@ VISIBLE_PROP_ALIASES: dict[str, tuple[str, ...]] = {
     "umbrella": ("umbrella",),
 }
 
+WATER_GROUND_CONTACT_NEGATIVES = {
+    "jumping",
+    "hopping",
+    "feet leaving the floor",
+    "heels lifting",
+    "standing up",
+    "large vertical displacement",
+}
+
 VISUAL_DESCRIPTION_SYSTEM = """You are Gemma's visual-description stage for an LTX image-to-video prompt.
 
 Return ONLY the rich visual description that belongs inside the final [SEED_IMAGE_DESCRIPTION] section.
@@ -194,11 +203,17 @@ def _strip_unsupported_prop_sentences(text: str, unsupported: list[str]) -> str:
         return value
 
     sentences = re.split(r"(?<=[.!?])\s+", value)
-    kept = [
-        sentence
-        for sentence in sentences
-        if not any(_contains_word(sentence, prop) for prop in unsupported)
-    ]
+    kept: list[str] = []
+    for sentence in sentences:
+        mentions_unsupported = False
+        for prop in unsupported:
+            aliases = VISIBLE_PROP_ALIASES.get(prop, (prop,))
+            if any(_contains_word(sentence, alias) for alias in aliases):
+                mentions_unsupported = True
+                break
+        if not mentions_unsupported:
+            kept.append(sentence)
+
     result = _clean_inline(" ".join(kept))
     if result:
         return result
@@ -268,6 +283,11 @@ def _tap_sync(item: dict[str, Any]) -> str:
     context_variant = str(policy.get("context_variant") or "")
     targets = _target_text(item)
 
+    prop_rule = (
+        "Animate a prop only when the seed-image description confirms it is visibly "
+        "present; ignore filename-only prop cues."
+    )
+
     if profile == "localized_glute_pulse" and context_variant == WATER_DYNAMIC_VARIANT:
         return (
             f"Primary tap accents: {targets}. Begin visible foreground motion "
@@ -282,8 +302,7 @@ def _tap_sync(item: dict[str, Any]) -> str:
             "as much as physically natural; do not force repeated squats or artificial "
             "whole-body vertical pumping. Maintain subtle pelvic micro-motion between "
             "taps. Do not use kick-drum or bass-only boom hits as major movement "
-            "triggers. Animate a prop only when [SEED_IMAGE_DESCRIPTION] confirms it is "
-            "visibly present; ignore filename-only prop cues."
+            f"triggers. {prop_rule}"
         )
 
     if profile == "localized_glute_pulse":
@@ -296,17 +315,15 @@ def _tap_sync(item: dict[str, Any]) -> str:
             "micro-motion between taps. Do not convert the accents into jumping, "
             "hopping, standing up, repeated squats, whole-body bouncing, or feet "
             "leaving the floor. Do not use kick-drum or bass-only boom hits as major "
-            "movement triggers. Animate a prop only when [SEED_IMAGE_DESCRIPTION] "
-            "confirms it is visibly present; ignore filename-only prop cues."
+            f"movement triggers. {prop_rule}"
         )
     return (
         f"Primary tap accents: {targets}. Begin visible foreground motion immediately. "
         "Use sharp clap, snare, hi-hat, and similar high-frequency tap transients as "
         "visible motion triggers. Land controlled visible action changes on each listed "
         "primary tap accent. Maintain coherent foreground motion between accents. Do not "
-        "use kick-drum or bass-only boom hits as major movement triggers. Animate a prop "
-        "only when [SEED_IMAGE_DESCRIPTION] confirms it is visibly present; ignore "
-        "filename-only prop cues."
+        "use kick-drum or bass-only boom hits as major movement triggers. "
+        f"{prop_rule}"
     )
 
 
@@ -351,11 +368,12 @@ def _negative(item: dict[str, Any]) -> str:
         defaults.append("missing background performers")
 
     unsupported_props = _unsupported_prop_references(item)
-    defaults.extend(f"invented {prop}" for prop in unsupported_props)
+    prop_negative_terms = [f"invented {prop}" for prop in unsupported_props]
 
     terms: list[str] = []
     seen: set[str] = set()
     for source in (
+        prop_negative_terms,
         str(expansion.get("negative_prompt") or "").split(","),
         list(choreography.get("negative_terms") or []),
         list(subject.get("negative_terms") or []),
@@ -364,6 +382,8 @@ def _negative(item: dict[str, Any]) -> str:
         for raw in source:
             value = _clean_inline(raw).strip(" ,")
             key = value.lower()
+            if water_dynamic and key in WATER_GROUND_CONTACT_NEGATIVES:
+                continue
             if value and key not in seen:
                 seen.add(key)
                 terms.append(value)
