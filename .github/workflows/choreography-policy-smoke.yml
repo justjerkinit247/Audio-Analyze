@@ -38,8 +38,10 @@ jobs:
             src/audio_analyze/ltx_choreography_profiles.py \
             src/audio_analyze/tap_accent_sync.py \
             src/audio_analyze/ltx_plan_prompt_expander.py \
+            src/audio_analyze/ltx_gemma_prompt_synthesizer.py \
             src/audio_analyze/ltx_live_run.py \
             tests/test_ltx_choreography_profiles.py \
+            tests/test_ltx_context_grounding.py \
             tests/test_ltx_tap_accent_sync.py \
             tests/test_ltx_plan_prompt_expander.py \
             tests/test_ltx_live_run.py
@@ -50,6 +52,7 @@ jobs:
         run: |
           python -m pytest -q \
             tests/test_ltx_choreography_profiles.py \
+            tests/test_ltx_context_grounding.py \
             tests/test_ltx_tap_accent_sync.py \
             tests/test_ltx_plan_prompt_expander.py \
             tests/test_ltx_live_run.py

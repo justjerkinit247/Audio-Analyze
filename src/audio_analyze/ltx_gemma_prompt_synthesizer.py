@@ -34,6 +34,27 @@ DEFAULT_NUM_PREDICT = 2600
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_ATTEMPTS = 3
 
+WATER_DYNAMIC_VARIANT = "water_dynamic"
+
+VISIBLE_PROP_ALIASES: dict[str, tuple[str, ...]] = {
+    "violin": ("violin",),
+    "guitar": ("guitar",),
+    "microphone": ("microphone", "mic"),
+    "drum": ("drum", "drums", "drumstick", "drumsticks"),
+    "piano": ("piano", "keyboard"),
+    "chair": ("chair", "stool"),
+    "umbrella": ("umbrella",),
+}
+
+WATER_GROUND_CONTACT_NEGATIVES = {
+    "jumping",
+    "hopping",
+    "feet leaving the floor",
+    "heels lifting",
+    "standing up",
+    "large vertical displacement",
+}
+
 VISUAL_DESCRIPTION_SYSTEM = """You are Gemma's visual-description stage for an LTX image-to-video prompt.
 
 Return ONLY the rich visual description that belongs inside the final [SEED_IMAGE_DESCRIPTION] section.
@@ -139,6 +160,69 @@ def _format_number(value: Any, digits: int = 2) -> str:
         return "unknown"
 
 
+def _contains_word(text: str, word: str) -> bool:
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(str(word).lower())}(?![a-z0-9])",
+            str(text or "").lower(),
+        )
+    )
+
+
+def _unsupported_prop_references(
+    item: dict[str, Any],
+    motion_source: str | None = None,
+) -> list[str]:
+    expansion = item.get("filename_hint_expansion") or {}
+    analysis = item.get("seed_image_analysis") or {}
+    visible_description = str(analysis.get("description") or "")
+    candidate_text = " ".join(
+        str(value or "")
+        for value in (
+            expansion.get("scene_hint"),
+            expansion.get("filename"),
+            item.get("seed_filename_used_for_prompt_hint"),
+            motion_source if motion_source is not None else expansion.get("ltx_motion_prompt"),
+        )
+    )
+
+    unsupported: list[str] = []
+    for prop, aliases in VISIBLE_PROP_ALIASES.items():
+        referenced = any(_contains_word(candidate_text, alias) for alias in aliases)
+        visually_confirmed = any(
+            _contains_word(visible_description, alias) for alias in aliases
+        )
+        if referenced and not visually_confirmed:
+            unsupported.append(prop)
+    return sorted(unsupported)
+
+
+def _strip_unsupported_prop_sentences(text: str, unsupported: list[str]) -> str:
+    value = _clean_inline(text)
+    if not value or not unsupported:
+        return value
+
+    sentences = re.split(r"(?<=[.!?])\s+", value)
+    kept: list[str] = []
+    for sentence in sentences:
+        mentions_unsupported = False
+        for prop in unsupported:
+            aliases = VISIBLE_PROP_ALIASES.get(prop, (prop,))
+            if any(_contains_word(sentence, alias) for alias in aliases):
+                mentions_unsupported = True
+                break
+        if not mentions_unsupported:
+            kept.append(sentence)
+
+    result = _clean_inline(" ".join(kept))
+    if result:
+        return result
+    return (
+        "Continue only motion grounded in the visible seed subject, environment, "
+        "and visually confirmed props."
+    )
+
+
 def _subject_lock(item: dict[str, Any]) -> str:
     policy = item.get("subject_count_policy") or {}
     requirements = [
@@ -195,7 +279,32 @@ def _tap_sync(item: dict[str, Any]) -> str:
     profile = item.get("tap_motion_profile") or (item.get("tap_sync") or {}).get(
         "motion_profile"
     )
+    policy = item.get("choreography_policy") or {}
+    context_variant = str(policy.get("context_variant") or "")
     targets = _target_text(item)
+
+    prop_rule = (
+        "Animate a prop only when the seed-image description confirms it is visibly "
+        "present; ignore filename-only prop cues."
+    )
+
+    if profile == "localized_glute_pulse" and context_variant == WATER_DYNAMIC_VARIANT:
+        return (
+            f"Primary tap accents: {targets}. Begin visible foreground motion "
+            "immediately at 0.00s. At each clap, snare, hi-hat, or sharp tap use "
+            "one compact localized twerk pulse: a glute-cheek contraction, small "
+            "backward pelvis pop, and controlled recoil. Use the seed image's visible "
+            "support and body-contact state as authoritative. If feet or heels are "
+            "submerged, cropped, airborne, or unclear, do not invent planted-foot or "
+            "heel-down constraints. Preserve the visible pose and contact family while "
+            "allowing natural splash, wading, landing, or buoyant motion already "
+            "supported by the seed. Keep the pulse localized to the glutes and pelvis "
+            "as much as physically natural; do not force repeated squats or artificial "
+            "whole-body vertical pumping. Maintain subtle pelvic micro-motion between "
+            "taps. Do not use kick-drum or bass-only boom hits as major movement "
+            f"triggers. {prop_rule}"
+        )
+
     if profile == "localized_glute_pulse":
         return (
             f"Primary tap accents: {targets}. Begin visible foreground motion "
@@ -206,14 +315,15 @@ def _tap_sync(item: dict[str, Any]) -> str:
             "micro-motion between taps. Do not convert the accents into jumping, "
             "hopping, standing up, repeated squats, whole-body bouncing, or feet "
             "leaving the floor. Do not use kick-drum or bass-only boom hits as major "
-            "movement triggers."
+            f"movement triggers. {prop_rule}"
         )
     return (
         f"Primary tap accents: {targets}. Begin visible foreground motion immediately. "
         "Use sharp clap, snare, hi-hat, and similar high-frequency tap transients as "
         "visible motion triggers. Land controlled visible action changes on each listed "
         "primary tap accent. Maintain coherent foreground motion between accents. Do not "
-        "use kick-drum or bass-only boom hits as major movement triggers."
+        "use kick-drum or bass-only boom hits as major movement triggers. "
+        f"{prop_rule}"
     )
 
 
@@ -222,7 +332,9 @@ def _motion(item: dict[str, Any]) -> str:
     source = expansion.get("ltx_motion_prompt") or (
         "Maintain continuous grounded motion and stable camera movement."
     )
-    base_motion = _truncate_control(str(source), 300)
+    unsupported = _unsupported_prop_references(item, str(source))
+    grounded_source = _strip_unsupported_prop_sentences(str(source), unsupported)
+    base_motion = _truncate_control(grounded_source, 300)
     asmo_block = _clean_inline(item.get("asmo_motion_prompt_block"))
     if not asmo_block:
         return base_motion
@@ -233,16 +345,21 @@ def _negative(item: dict[str, Any]) -> str:
     expansion = item.get("filename_hint_expansion") or {}
     choreography = item.get("choreography_policy") or {}
     subject = item.get("subject_count_policy") or {}
+    water_dynamic = str(choreography.get("context_variant") or "") == WATER_DYNAMIC_VARIANT
+
     defaults = [
         "extra limbs",
         "distorted anatomy",
-        "jumping",
-        "feet leaving the floor",
         "missing visible foreground subject",
         "changed subject count",
         "warped background",
         "flicker",
     ]
+    if water_dynamic:
+        defaults.append("repeated artificial whole-body vertical pumping")
+    else:
+        defaults.extend(["jumping", "feet leaving the floor"])
+
     if subject.get("has_pair"):
         defaults.append("missing foreground partner")
     if subject.get("has_choir"):
@@ -250,9 +367,13 @@ def _negative(item: dict[str, Any]) -> str:
     elif subject.get("has_group"):
         defaults.append("missing background performers")
 
+    unsupported_props = _unsupported_prop_references(item)
+    prop_negative_terms = [f"invented {prop}" for prop in unsupported_props]
+
     terms: list[str] = []
     seen: set[str] = set()
     for source in (
+        prop_negative_terms,
         str(expansion.get("negative_prompt") or "").split(","),
         list(choreography.get("negative_terms") or []),
         list(subject.get("negative_terms") or []),
@@ -261,6 +382,8 @@ def _negative(item: dict[str, Any]) -> str:
         for raw in source:
             value = _clean_inline(raw).strip(" ,")
             key = value.lower()
+            if water_dynamic and key in WATER_GROUND_CONTACT_NEGATIVES:
+                continue
             if value and key not in seen:
                 seen.add(key)
                 terms.append(value)
@@ -446,6 +569,7 @@ def synthesize_final_ltx_prompt(
             previous_length = len(visual)
             continue
 
+        unsupported_props = _unsupported_prop_references(item)
         return {
             "status": "complete",
             "provider": "ollama",
@@ -463,6 +587,10 @@ def synthesize_final_ltx_prompt(
             "hard_limit_chars": int(max_chars),
             "target_min_chars": int(target_min),
             "target_max_chars": int(target_max),
+            "unsupported_prop_references_removed": unsupported_props,
+            "choreography_context_variant": str(
+                (item.get("choreography_policy") or {}).get("context_variant") or ""
+            ),
             "attempt_count": attempt,
             "attempts": attempts,
             "validation_passed": True,
