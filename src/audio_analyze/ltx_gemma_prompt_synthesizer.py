@@ -222,7 +222,11 @@ def _motion(item: dict[str, Any]) -> str:
     source = expansion.get("ltx_motion_prompt") or (
         "Maintain continuous grounded motion and stable camera movement."
     )
-    return _truncate_control(str(source), 300)
+    base_motion = _truncate_control(str(source), 300)
+    asmo_block = _clean_inline(item.get("asmo_motion_prompt_block"))
+    if not asmo_block:
+        return base_motion
+    return f"{base_motion} {asmo_block}".strip()
 
 
 def _negative(item: dict[str, Any]) -> str:

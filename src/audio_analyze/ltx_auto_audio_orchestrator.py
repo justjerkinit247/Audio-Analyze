@@ -39,6 +39,10 @@ def _load_tap_sync_module():
     return importlib.import_module(".tap_accent_sync", __package__)
 
 
+def _load_asmo_run_integrator_module():
+    return importlib.import_module(".asmo_engine.ltx_run_integrator", __package__)
+
+
 def write_json(path, data):
     path_policy = _load_path_policy_module()
     path = path_policy.resolve_runtime_path(path)
@@ -341,6 +345,10 @@ def _patch_plan_after_old_build_plan(
     filename_hint_provider="ollama",
     filename_hint_model="gemma3:4b",
     apply_asmo_negative_memory=True,
+    apply_asmo_timeline=False,
+    asmo_lyric_path=None,
+    asmo_max_events_per_scene=8,
+    start_offset_seconds=0.0,
     apply_tap_accent_sync=True,
     state_root=DEFAULT_STATE_ROOT,
     run_id=None,
@@ -370,6 +378,21 @@ def _patch_plan_after_old_build_plan(
             patched["asmo_negative_memory_applied"] = True
         else:
             patched["asmo_negative_memory_applied"] = False
+
+        if apply_asmo_timeline:
+            if not asmo_lyric_path:
+                raise ValueError(
+                    "ASMO timeline integration requires a TXT or LRC lyric file."
+                )
+            asmo_integrator = _load_asmo_run_integrator_module()
+            patched = asmo_integrator.apply_asmo_timeline_to_plan_data(
+                patched,
+                lyric_path=asmo_lyric_path,
+                max_events_per_scene=asmo_max_events_per_scene,
+                start_offset_seconds=start_offset_seconds,
+            )
+        else:
+            patched["asmo_ltx_run_integration"] = False
 
         if apply_tap_accent_sync:
             tap_sync = _load_tap_sync_module()
@@ -424,6 +447,9 @@ def run_auto_audio_orchestrator(
     filename_hint_provider="ollama",
     filename_hint_model="gemma3:4b",
     apply_asmo_negative_memory=True,
+    apply_asmo_timeline=False,
+    asmo_lyric_path=None,
+    asmo_max_events_per_scene=8,
     apply_tap_accent_sync=True,
     state_root=DEFAULT_STATE_ROOT,
     run_id=None,
@@ -467,6 +493,7 @@ def run_auto_audio_orchestrator(
     print(f"Audio selected: {audio_path.resolve()}")
     print(f"Beat alignment enabled: {bool(beat_align)}")
     print(f"Tap-accent sync enabled: {bool(apply_tap_accent_sync)}")
+    print(f"Full ASMO timeline enabled: {bool(apply_asmo_timeline)}")
 
     original_build_plan = orchestrator.build_plan
     original_extract_beat_markers = orchestrator.extract_beat_markers
@@ -483,6 +510,10 @@ def run_auto_audio_orchestrator(
         filename_hint_provider=filename_hint_provider,
         filename_hint_model=filename_hint_model,
         apply_asmo_negative_memory=apply_asmo_negative_memory,
+        apply_asmo_timeline=apply_asmo_timeline,
+        asmo_lyric_path=asmo_lyric_path,
+        asmo_max_events_per_scene=asmo_max_events_per_scene,
+        start_offset_seconds=start_offset_seconds,
         apply_tap_accent_sync=apply_tap_accent_sync,
         state_root=state_root,
         run_id=active_run_id,
@@ -550,6 +581,9 @@ def run_auto_audio_orchestrator(
     result["filename_hint_provider"] = filename_hint_provider
     result["filename_hint_model"] = filename_hint_model
     result["asmo_negative_memory_requested"] = bool(apply_asmo_negative_memory)
+    result["asmo_timeline_requested"] = bool(apply_asmo_timeline)
+    result["asmo_lyric_path"] = str(asmo_lyric_path) if asmo_lyric_path else None
+    result["asmo_max_events_per_scene"] = int(asmo_max_events_per_scene)
     result["tap_accent_sync_requested"] = bool(apply_tap_accent_sync)
     result["tap_sync_policy"] = (
         "tap_not_boom" if apply_tap_accent_sync else "disabled"
@@ -606,6 +640,12 @@ def main():
     parser.add_argument("--filename-hint-model", default="gemma3:4b")
     parser.add_argument("--state-root", default=DEFAULT_STATE_ROOT)
     parser.add_argument("--no-asmo-negative-memory", action="store_true")
+    parser.add_argument(
+        "--lyrics",
+        default=None,
+        help="Optional TXT or LRC lyric path; enables full ASMO timeline injection.",
+    )
+    parser.add_argument("--asmo-max-events-per-scene", type=int, default=8)
     parser.add_argument(
         "--no-tap-accent-sync",
         action="store_true",
@@ -671,6 +711,9 @@ def main():
         filename_hint_provider=args.filename_hint_provider,
         filename_hint_model=args.filename_hint_model,
         apply_asmo_negative_memory=not args.no_asmo_negative_memory,
+        apply_asmo_timeline=bool(args.lyrics),
+        asmo_lyric_path=args.lyrics,
+        asmo_max_events_per_scene=args.asmo_max_events_per_scene,
         apply_tap_accent_sync=not args.no_tap_accent_sync,
         state_root=args.state_root,
         run_id=args.run_id,

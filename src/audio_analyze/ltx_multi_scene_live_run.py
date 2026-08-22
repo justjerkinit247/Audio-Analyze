@@ -31,6 +31,7 @@ from .ltx_live_run import (
     _open_file,
     _read_json,
     _repo_root,
+    _validate_asmo_exact_payload,
     _validate_gemma_exact_payload,
     _write_text,
 )
@@ -180,6 +181,7 @@ def _validate_multi_scene_plan(
         scene = results[index - 1]
         scene_problems: list[str] = []
         prompt = _validate_gemma_exact_payload(scene, scene_problems)
+        _validate_asmo_exact_payload(plan, scene, prompt, scene_problems)
 
         if int(scene.get("clip_index") or 0) != index:
             scene_problems.append(
@@ -358,6 +360,14 @@ def run_interactive(args: argparse.Namespace) -> int:
     if not audio.is_file():
         raise FileNotFoundError(f"Audio file not found: {audio}")
 
+    lyrics = Path(args.lyrics).expanduser().resolve() if args.lyrics else _choose_file(
+        "Select the TXT or LRC lyrics for ASMO timing",
+        [("Lyric files", "*.txt *.lrc"), ("All files", "*.*")],
+        repo / "inputs" / "lyrics",
+    )
+    if not lyrics.is_file():
+        raise FileNotFoundError(f"Lyric file not found: {lyrics}")
+
     paths = _make_run_paths(repo)
     if args.seed:
         single_staging = paths.root / "_single_seed_staging"
@@ -399,6 +409,7 @@ def run_interactive(args: argparse.Namespace) -> int:
     print("\nBuilding a brand-new isolated multi-scene plan...")
     print(f"Run ID: {paths.run_id}")
     print(f"Audio: {audio.name}")
+    print(f"ASMO lyrics: {lyrics.name}")
     print(f"Scene count: {requested_count}")
     print(f"Resolution: {resolution}")
     print(f"Choreography policy request: {requested_profile}")
@@ -422,6 +433,9 @@ def run_interactive(args: argparse.Namespace) -> int:
             guidance_scale=args.guidance_scale,
             filename_hint_provider="ollama",
             filename_hint_model=args.ollama_model,
+            apply_asmo_timeline=True,
+            asmo_lyric_path=lyrics,
+            asmo_max_events_per_scene=args.asmo_max_events_per_scene,
             allow_sorted_seed_fallback=False,
             allow_duplicate_seed_reuse=False,
             live=False,
@@ -448,6 +462,7 @@ def run_interactive(args: argparse.Namespace) -> int:
     print(f"Scene count: {len(scenes)}")
     print(f"Resolution: {resolution}")
     print("Gemma exact payload verified for every scene: YES")
+    print("Full ASMO timeline verified for every scene: YES")
     print(f"Prompt bundle: {paths.prompt}")
     for scene in scenes:
         policy = scene.get("choreography_policy") or {}
@@ -459,6 +474,7 @@ def run_interactive(args: argparse.Namespace) -> int:
             f"Scene {int(scene.get('clip_index') or 0):02d}: "
             f"{len(str(scene.get('prompt_text') or ''))}/5000 chars, "
             f"{len(taps)} taps, "
+            f"{scene.get('asmo_motion_event_count')} ASMO events, "
             f"profile={policy.get('profile_id') or scene.get('tap_motion_profile')}, "
             f"Gemma={synthesis.get('model')}"
         )
@@ -527,6 +543,8 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--audio", default=None, help="Optional source audio path.")
+    parser.add_argument("--lyrics", default=None, help="Optional TXT or LRC lyric path.")
+    parser.add_argument("--asmo-max-events-per-scene", type=int, default=8)
     parser.add_argument(
         "--seed-dir",
         default=None,

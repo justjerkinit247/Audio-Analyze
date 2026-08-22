@@ -5,13 +5,20 @@ import pytest
 from audio_analyze import ltx_live_run as live
 
 
+ASMO_BLOCK = (
+    "TIMED ASMO MOTION DIRECTIVES: "
+    "- +0.500s: perform controlled hip isolation synchronized tightly to rhythm; "
+    "camera=waist_tracking; lyric='twerk'"
+)
+
+
 def _valid_prompt() -> str:
     return (
         "[SUBJECT_LOCK]\nPreserve every visible person and the original body layout.\n\n"
         "[SEED_IMAGE_DESCRIPTION]\nTwo visible performers stand in a sunlit cathedral with a choir behind them.\n\n"
         "[AUDIO_TIMING]\nScene timing follows the supplied audio.\n\n"
         "[TAP_SYNC]\nUse sharp clap, snare, hi-hat accents. Land controlled visible action changes while ignoring bass-only boom hits.\n\n"
-        "[MOTION_PROMPT]\nControlled continuous motion.\n\n"
+        f"[MOTION_PROMPT]\nControlled continuous motion. {ASMO_BLOCK}\n\n"
         "[NEGATIVE_PROMPT]\nNo artifacts, missing subjects, or warped anatomy.\n"
     )
 
@@ -19,6 +26,7 @@ def _valid_prompt() -> str:
 def valid_plan(*, run_id="ltx_test", filename="scene_01_solo_actor.png", multiple=False):
     prompt = _valid_prompt()
     return {
+        "asmo_ltx_run_integration": True,
         "fresh_run": {"run_id": run_id},
         "plan_reuse_allowed": False,
         "results": [
@@ -57,6 +65,10 @@ def valid_plan(*, run_id="ltx_test", filename="scene_01_solo_actor.png", multipl
                     "required_prompt_phrases": [],
                 },
                 "tap_sync": {"primary_sync_targets_seconds": [0.5]},
+                "asmo_injection_status": "injected",
+                "asmo_motion_event_count": 1,
+                "asmo_motion_events": [{"timestamp_ms": 500}],
+                "asmo_motion_prompt_block": ASMO_BLOCK,
                 "prompt_text": prompt,
             }
         ],
@@ -179,6 +191,15 @@ def test_validate_plan_rejects_exact_payload_mismatch():
         validate(plan)
 
 
+def test_validate_plan_rejects_missing_asmo_timeline_before_live_submit():
+    plan = valid_plan()
+    plan["asmo_ltx_run_integration"] = False
+    plan["results"][0]["asmo_injection_status"] = "skipped_no_events_in_scene_window"
+
+    with pytest.raises(RuntimeError, match="full ASMO timeline integration"):
+        validate(plan)
+
+
 def test_validate_plan_rejects_legacy_prefix_payload():
     plan = valid_plan()
     scene = plan["results"][0]
@@ -209,3 +230,4 @@ def test_validate_plan_rejects_empty_visual_section():
 def test_parser_defaults_to_auto_choreography_policy():
     args = live.build_parser().parse_args([])
     assert args.choreography_profile == "auto"
+    assert args.asmo_max_events_per_scene == 8
