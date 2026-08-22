@@ -63,7 +63,7 @@ _WATER_PROMPT_TEMPLATE = (
     "Between listed accents, maintain subtle continuous pelvic micro-motion and controlled hip "
     "sway so the image never freezes while waiting for the next tap. Do not use kick-drum or "
     "bass-only boom hits as major movement triggers. A prop may be animated only when the "
-    "[SEED_IMAGE_DESCRIPTION] confirms it is visibly present; otherwise ignore prop-like "
+    "seed-image description confirms it is visibly present; otherwise ignore prop-like "
     "filename cue wording. This TAP_SYNC instruction overrides generic grounded-foot, jumping, "
     "bouncing, kick-driven, full-body, vertical, or unsupported-prop wording elsewhere in the prompt.\n"
 )
@@ -212,7 +212,7 @@ def _apply_context_variant(
         "compact localized twerk pulse",
         "seed image's actual support and body contact",
         "do not invent planted-foot or heel-down constraints",
-        "[SEED_IMAGE_DESCRIPTION] confirms it is visibly present",
+        "seed-image description confirms it is visibly present",
     ]
 
     manifest = deepcopy(selected.get("manifest") or {})
