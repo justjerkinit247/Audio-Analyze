@@ -26,6 +26,23 @@ A validation-only run is also available:
 .\run-ltx-live.cmd --dry-run
 ```
 
+## New Windows PC setup / migration
+
+For a clean Windows installation or a move to another PC, use the repository bootstrap instead of copying an old `.venv`:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+.\scripts\Setup-New-PC.ps1
+```
+
+To migrate reusable local media plus learned ASMO memory/policy from an older checkout:
+
+```powershell
+.\scripts\Setup-New-PC.ps1 -OldRepoPath "D:\path\to\old\Audio-Analyze"
+```
+
+Add `-CopyLegacyOutputs` if the old generated-output tree should also be preserved in the migration archive. See `docs/new_pc_migration.md` for the complete workflow and the list of files that are intentionally rebuilt or excluded.
+
 ## What this repo does
 
 - Analyze WAV and MP3 files for tempo, timing, and profile data
