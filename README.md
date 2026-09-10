@@ -35,6 +35,20 @@ The launcher prints the resulting order and gives temporary copies sequential la
 for internal mapping. Original files are never renamed; descriptions are retained.
 This applies to the picker, `--seed`, and `--seed-dir` on `run-ltx-live.cmd`.
 
+### Automatic Ollama startup on Windows
+
+The launcher reuses a model already listed by Ollama. When starting Ollama, it reads
+`OLLAMA_MODELS` from saved Windows user settings, then system settings, then the
+current process environment, with `~/.ollama/models` as the fallback. No separate
+server window is needed.
+
+If the requested model has a manifest in that folder but the local server cannot
+see it, the launcher restarts only the verified Ollama listener on the configured
+port with the saved model path and checks again. It never downloads over that
+mismatch: unresolved recovery stops with an error. A model absent from both the
+server list and that folder is pulled using the same endpoint. Remote endpoints
+are checked but never restarted locally.
+
 ## New Windows PC setup / migration
 
 For a clean Windows installation or a move to another PC, use the repository bootstrap instead of copying an old `.venv`:
