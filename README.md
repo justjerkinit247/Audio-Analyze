@@ -26,6 +26,15 @@ A validation-only run is also available:
 .\run-ltx-live.cmd --dry-run
 ```
 
+Seed filenames only need a creative description, such as `woman_walking_through_water.png`
+or `scene_21_woman_walking_through_water.png`. Scene numbers are optional and do not
+need to start at 1 or be consecutive. Repeated numbers are accepted. When every
+selected image has a scene label, numeric order is used; otherwise the order returned
+by the picker (or pasted path list) is used. `--seed-dir` starts with filename order.
+The launcher prints the resulting order and gives temporary copies sequential labels
+for internal mapping. Original files are never renamed; descriptions are retained.
+This applies to the picker, `--seed`, and `--seed-dir` on `run-ltx-live.cmd`.
+
 ## New Windows PC setup / migration
 
 For a clean Windows installation or a move to another PC, use the repository bootstrap instead of copying an old `.venv`:
