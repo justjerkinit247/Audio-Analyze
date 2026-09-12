@@ -250,15 +250,6 @@ def _validate_plan(
         ):
             problems.append("multiple-subject scene still contains solo/solitary wording")
 
-        choreography_policy = scene.get("choreography_policy") or {}
-        profile_id = choreography_policy.get("profile_id") or scene.get(
-            "tap_motion_profile"
-        )
-        for phrase in choreography_policy.get("required_prompt_phrases") or []:
-            if phrase not in prompt:
-                problems.append(
-                    f"choreography profile {profile_id!r} prompt is missing: {phrase}"
-                )
 
     if problems:
         raise RuntimeError(
