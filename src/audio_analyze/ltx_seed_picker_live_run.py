@@ -8,6 +8,7 @@ import tempfile
 
 from . import ltx_multi_scene_live_run as base
 from .ltx_seed_mapper import ALLOWED_IMAGES, scene_number_from_name
+from .ltx_filename_hint_expander import SCENE_PREFIX_PATTERNS, clean_scene_hint
 
 
 DEFAULT_GUIDANCE_SCALE = 12.0
@@ -64,69 +65,35 @@ def _ordered_selected_seed_files(
         seen.add(key)
         if not resolved.is_file() or resolved.suffix.lower() not in ALLOWED_IMAGES:
             raise FileNotFoundError(f"Seed image not found or unsupported: {resolved}")
+        if not clean_scene_hint(resolved.name):
+            raise ValueError(f"Seed filename needs a description: {resolved.name}")
         unique.append(resolved)
 
-    count = base._validate_scene_count(requested_count or len(unique))
+    count = base._validate_scene_count(len(unique) if requested_count is None else requested_count)
     if len(unique) != count:
         raise RuntimeError(
             f"Selected {len(unique)} seed images but the requested scene count is {count}. "
             "Select exactly one image per scene."
         )
 
-    parents = {str(path.parent).lower() for path in unique}
-    if len(parents) != 1:
-        raise RuntimeError("All selected seed images must come from the same folder.")
-
-    if count == 1 and scene_number_from_name(unique[0]) is None:
-        return unique
-
-    by_scene: dict[int, Path] = {}
-    unlabeled: list[str] = []
-    for path in unique:
-        scene_number = scene_number_from_name(path)
-        if scene_number is None:
-            unlabeled.append(path.name)
-            continue
-        if scene_number in by_scene:
-            raise RuntimeError(
-                f"Duplicate scene_{scene_number:02d} selection: "
-                f"{by_scene[scene_number].name}, {path.name}"
-            )
-        by_scene[scene_number] = path
-
-    if unlabeled:
-        raise RuntimeError(
-            "Multiple selected seeds must include scene labels in their filenames. "
-            f"Unlabeled selections: {', '.join(unlabeled)}"
-        )
-
-    missing = [number for number in range(1, count + 1) if number not in by_scene]
-    if missing:
-        labels = ", ".join(f"scene_{number:02d}" for number in missing)
-        raise RuntimeError(f"Missing selected seed labels: {labels}")
-
-    extra = sorted(number for number in by_scene if number > count)
-    if extra:
-        labels = ", ".join(f"scene_{number:02d}" for number in extra)
-        raise RuntimeError(f"Selected scene labels exceed the requested count: {labels}")
-
-    return [by_scene[number] for number in range(1, count + 1)]
+    # Existing labels are optional ordering hints, never required scene IDs.
+    # Stable sorting retains selection order for repeated labels.
+    if all(scene_number_from_name(path) is not None for path in unique):
+        return sorted(unique, key=lambda path: scene_number_from_name(path))
+    return unique
 
 
 def _copy_selected_for_pipeline(selected: list[Path], destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for index, source in enumerate(selected, start=1):
-        scene_number = scene_number_from_name(source)
-        filename = source.name
-        if scene_number is None:
-            filename = f"scene_{index:02d}_{source.name}"
+        description = source.stem
+        for pattern in SCENE_PREFIX_PATTERNS:
+            description = pattern.sub("", description)
+        filename = f"scene_{index:02d}_{description}{source.suffix}"
         shutil.copy2(source, destination / filename)
 
 
 def run_interactive(args: argparse.Namespace) -> int:
-    if args.seed or args.seed_dir:
-        return base.run_interactive(args)
-
     repo = base._repo_root()
     if not args.audio:
         args.audio = str(
@@ -140,12 +107,27 @@ def run_interactive(args: argparse.Namespace) -> int:
             )
         )
 
-    default_seed_dir = repo / "inputs" / "ltx_seed_images"
-    selected = _choose_seed_files(
-        "Select 1 to 20 seed images from the existing LTX seed-image folder",
-        default_seed_dir,
-    )
+    if args.seed:
+        selected = [Path(args.seed)]
+    elif args.seed_dir:
+        seed_dir = Path(args.seed_dir).expanduser().resolve()
+        if not seed_dir.is_dir():
+            raise NotADirectoryError(f"Seed-image folder not found: {seed_dir}")
+        selected = sorted(
+            (path for path in seed_dir.iterdir()
+             if path.is_file() and path.suffix.lower() in ALLOWED_IMAGES),
+            key=lambda path: path.name.lower(),
+        )
+    else:
+        selected = _choose_seed_files(
+            "Select 1 to 20 seed images with descriptive filenames (numbers optional)",
+            repo / "inputs" / "ltx_seed_images",
+        )
     ordered = _ordered_selected_seed_files(selected, args.max_scenes)
+
+    print("\nSeed order for this run:")
+    for index, seed in enumerate(ordered, start=1):
+        print(f"  {index}: {seed.name}")
 
     staging_parent = repo / "outputs" / "ltx_video_run" / "_selected_seed_staging"
     staging_parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +143,10 @@ def run_interactive(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = base.build_parser()
     parser.set_defaults(guidance_scale=DEFAULT_GUIDANCE_SCALE)
+    parser.description = "Build an LTX run from descriptive seed filenames; scene numbers are optional."
+    for action in parser._actions:
+        if action.dest == "seed_dir":
+            action.help = "Folder of descriptive seed images; scene numbers are optional."
     return parser
 
 

@@ -10,9 +10,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 
 from .ltx_auto_audio_orchestrator import (
     generate_run_id,
@@ -102,45 +99,8 @@ def _ask_start_offset(default: float = 0.0) -> float:
 
 
 def _ensure_ollama(url: str, model: str) -> None:
-    tags_url = f"{url.rstrip('/')}/api/tags"
-
-    def read_tags() -> dict[str, Any] | None:
-        try:
-            with urllib.request.urlopen(tags_url, timeout=4) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except (OSError, urllib.error.URLError, json.JSONDecodeError):
-            return None
-
-    tags = read_tags()
-    if tags is None:
-        try:
-            creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            subprocess.Popen(
-                ["ollama", "serve"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creation_flags,
-            )
-        except (FileNotFoundError, OSError) as exc:
-            raise RuntimeError("Ollama is not installed or is not available on PATH.") from exc
-
-        for _ in range(25):
-            time.sleep(1)
-            tags = read_tags()
-            if tags is not None:
-                break
-    if tags is None:
-        raise RuntimeError("Ollama did not start or respond.")
-
-    installed = {
-        str(item.get("name") or item.get("model") or "")
-        for item in tags.get("models", [])
-    }
-    if model not in installed:
-        print(f"Downloading Ollama model {model}...")
-        completed = subprocess.run(["ollama", "pull", model], check=False)
-        if completed.returncode != 0:
-            raise RuntimeError(f"Unable to download Ollama model {model}.")
+    from .ollama_startup import ensure_ollama
+    ensure_ollama(url, model)
 
 
 def _make_run_paths(repo: Path) -> RunPaths:
@@ -290,15 +250,6 @@ def _validate_plan(
         ):
             problems.append("multiple-subject scene still contains solo/solitary wording")
 
-        choreography_policy = scene.get("choreography_policy") or {}
-        profile_id = choreography_policy.get("profile_id") or scene.get(
-            "tap_motion_profile"
-        )
-        for phrase in choreography_policy.get("required_prompt_phrases") or []:
-            if phrase not in prompt:
-                problems.append(
-                    f"choreography profile {profile_id!r} prompt is missing: {phrase}"
-                )
 
     if problems:
         raise RuntimeError(
