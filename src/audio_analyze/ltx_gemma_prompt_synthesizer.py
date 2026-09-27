@@ -132,8 +132,8 @@ def _strip_leading_seed_description_marker(text: str) -> tuple[str, bool]:
 
     value = str(text or "").strip()
     pattern = re.compile(
-        rf"^(?:#+\\s*)?{re.escape(SEED_IMAGE_DESCRIPTION_MARKER)}"
-        r"(?:\\s*[:\\-]\\s*)?",
+        rf"^(?:#+\s*)?{re.escape(SEED_IMAGE_DESCRIPTION_MARKER)}"
+        r"(?:\s*[:\-]\s*)?",
         re.IGNORECASE,
     )
     cleaned, count = pattern.subn("", value, count=1)
