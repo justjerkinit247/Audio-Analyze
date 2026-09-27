@@ -93,15 +93,29 @@ def test_short_under_budget_description_is_accepted_unchanged():
     assert result["final_prompt"].startswith("[SUBJECT_LOCK]")
 
 
-def test_visual_response_with_reserved_marker_is_rejected():
-    visual = (
+def test_leading_seed_marker_is_removed_but_embedded_marker_is_rejected():
+    leading = (
         f"{SEED_IMAGE_DESCRIPTION_MARKER}\n"
         "Two foreground performers remain together inside the cathedral."
     )
+    result = synthesize_final_ltx_prompt(
+        _item(),
+        client=FakeClient(leading),
+        max_attempts=1,
+    )
 
+    assert result["seed_description"] == (
+        "Two foreground performers remain together inside the cathedral."
+    )
+    assert result["attempts"][0]["leading_seed_marker_removed"] is True
+
+    embedded = (
+        "Two foreground performers remain together inside the cathedral. "
+        f"{SEED_IMAGE_DESCRIPTION_MARKER}"
+    )
     with pytest.raises(ValueError, match="forbidden control marker"):
         synthesize_final_ltx_prompt(
             _item(),
-            client=FakeClient(visual),
+            client=FakeClient(embedded),
             max_attempts=1,
         )
