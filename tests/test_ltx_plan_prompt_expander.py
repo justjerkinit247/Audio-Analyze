@@ -2,6 +2,7 @@ from audio_analyze.ltx_plan_prompt_expander import (
     AUDIO_TIMING_MARKER,
     SUBJECT_LOCK_MARKER,
     expand_plan_data,
+    build_subject_count_policy,
 )
 
 
@@ -199,3 +200,14 @@ def test_duet_and_choir_filename_removes_false_solitary_language():
     assert "missing foreground partner" in negative
     assert "missing choir" in negative
     assert "changed subject count" in negative
+
+
+def test_gender_words_do_not_imply_a_foreground_pair():
+    policy = build_subject_count_policy(
+        "scene_01_woman_at_waterfall.png",
+        "woman at waterfall",
+        "One woman holds water; a male singer is mentioned in the scene notes.",
+    )
+    assert policy["has_pair"] is False
+    assert policy["multiple_subjects"] is False
+    assert "missing foreground partner" not in policy["negative_terms"]
