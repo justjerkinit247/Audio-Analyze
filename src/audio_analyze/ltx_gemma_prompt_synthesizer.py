@@ -121,6 +121,25 @@ def _clean_response(text: str) -> str:
     return value
 
 
+def _strip_leading_seed_description_marker(text: str) -> tuple[str, bool]:
+    """Remove one echoed section label at the start of Gemma's response.
+
+    Gemma occasionally follows the instruction by returning the section label
+    before the actual description. That label is owned by the Python envelope,
+    so it is safe to remove only when it is the first non-whitespace text.
+    Reserved markers appearing later remain validation errors.
+    """
+
+    value = str(text or "").strip()
+    pattern = re.compile(
+        rf"^(?:#+\s*)?{re.escape(SEED_IMAGE_DESCRIPTION_MARKER)}"
+        r"(?:\s*[:\-]\s*)?",
+        re.IGNORECASE,
+    )
+    cleaned, count = pattern.subn("", value, count=1)
+    return cleaned.strip(), bool(count)
+
+
 def _clean_inline(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -529,6 +548,7 @@ def synthesize_final_ltx_prompt(
             ),
         )
         visual = _clean_response(raw)
+        visual, leading_seed_marker_removed = _strip_leading_seed_description_marker(visual)
         visual_problems: list[str] = []
         if not visual:
             visual_problems.append("Gemma returned an empty visual description")
@@ -549,6 +569,7 @@ def synthesize_final_ltx_prompt(
                 "response_mode": "bounded_visual_description",
                 "raw_char_count": len(str(raw or "")),
                 "visual_description_char_count": len(visual),
+                "leading_seed_marker_removed": leading_seed_marker_removed,
                 "description_char_limit_given_before_generation": description_max_chars,
                 "problems": list(visual_problems),
             }

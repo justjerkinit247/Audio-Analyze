@@ -130,7 +130,6 @@ def build_subject_count_policy(
         bool(authoritative_tokens & PAIR_TOKENS)
         or _explicit_subject_pair(authoritative_text)
         or _explicit_subject_pair(scene_description)
-        or (has_female and has_male)
     )
     has_choir = "choir" in all_tokens
     has_group = (
