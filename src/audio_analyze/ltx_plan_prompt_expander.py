@@ -93,13 +93,13 @@ def _explicit_subject_pair(value: str) -> bool:
         rf"\b(?:two|both|a pair of|a couple of)\s+(?:visible\s+)?(?:{SUBJECT_NOUN_PATTERN})\b",
         text,
     )
-    female_subject = r"(?:one|a)\\s+(?:woman|female|girl|lady)"
-    male_subject = r"(?:one|a)\\s+(?:man|male|guy|gentleman)"
+    female_subject = r"(?:one|a)\s+(?:woman|female|girl|lady)"
+    male_subject = r"(?:one|a)\s+(?:man|male|guy|gentleman)"
     mixed_pair = bool(
-        re.search(rf"\\b{female_subject}\\s+(?:and|with|alongside)\\s+{male_subject}\\b", text)
-        or re.search(rf"\\b{male_subject}\\s+(?:and|with|alongside)\\s+{female_subject}\\b", text)
+        re.search(rf"\b{female_subject}\s+(?:and|with|alongside)\s+{male_subject}\b", text)
+        or re.search(rf"\b{male_subject}\s+(?:and|with|alongside)\s+{female_subject}\b", text)
     )
-    return bool(direct_pair or mixed_pair or re.search(r"\\bforeground pair\\b", text))
+    return bool(direct_pair or mixed_pair or re.search(r"\bforeground pair\b", text))
 
 
 def _explicit_subject_group(value: str) -> bool:
