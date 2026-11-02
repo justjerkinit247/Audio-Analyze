@@ -297,3 +297,25 @@ def test_vision_config_allows_longer_native_output(monkeypatch):
     config = _vision_config("gemma3:4b")
     assert config.num_predict == 2048
     assert config.timeout_seconds >= 600
+
+
+
+def test_disconnected_gender_mentions_do_not_imply_a_foreground_pair():
+    policy = build_subject_count_policy(
+        "scene_01_woman_at_waterfall.png",
+        "woman at waterfall",
+        "One woman holds water; a male singer is mentioned in the scene notes.",
+    )
+    assert policy["has_pair"] is False
+    assert policy["multiple_subjects"] is False
+    assert "missing foreground partner" not in policy["negative_terms"]
+
+
+def test_explicit_mixed_gender_pair_is_still_detected():
+    policy = build_subject_count_policy(
+        "scene_01_duet.png",
+        "duet",
+        "One woman and one man perform together in the foreground.",
+    )
+    assert policy["has_pair"] is True
+    assert policy["multiple_subjects"] is True

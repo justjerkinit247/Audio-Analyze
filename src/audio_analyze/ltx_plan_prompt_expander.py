@@ -93,11 +93,13 @@ def _explicit_subject_pair(value: str) -> bool:
         rf"\b(?:two|both|a pair of|a couple of)\s+(?:visible\s+)?(?:{SUBJECT_NOUN_PATTERN})\b",
         text,
     )
-    mixed_pair = (
-        re.search(r"\b(?:one|a)\s+(?:woman|female|girl|lady)\b", text)
-        and re.search(r"\b(?:one|a)\s+(?:man|male|guy|gentleman)\b", text)
+    female_subject = r"(?:one|a)\\s+(?:woman|female|girl|lady)"
+    male_subject = r"(?:one|a)\\s+(?:man|male|guy|gentleman)"
+    mixed_pair = bool(
+        re.search(rf"\\b{female_subject}\\s+(?:and|with|alongside)\\s+{male_subject}\\b", text)
+        or re.search(rf"\\b{male_subject}\\s+(?:and|with|alongside)\\s+{female_subject}\\b", text)
     )
-    return bool(direct_pair or mixed_pair or re.search(r"\bforeground pair\b", text))
+    return bool(direct_pair or mixed_pair or re.search(r"\\bforeground pair\\b", text))
 
 
 def _explicit_subject_group(value: str) -> bool:
@@ -124,13 +126,10 @@ def build_subject_count_policy(
     authoritative_tokens = _scene_tokens(authoritative_text)
     all_tokens = _scene_tokens(all_text)
 
-    has_female = bool(all_tokens & FEMALE_TOKENS)
-    has_male = bool(all_tokens & MALE_TOKENS)
     has_pair = (
         bool(authoritative_tokens & PAIR_TOKENS)
         or _explicit_subject_pair(authoritative_text)
         or _explicit_subject_pair(scene_description)
-        or (has_female and has_male)
     )
     has_choir = "choir" in all_tokens
     has_group = (
