@@ -39,6 +39,8 @@ jobs:
             src/audio_analyze/ltx_gemma_prompt_synthesizer.py \
             src/audio_analyze/ltx_prompt_budget.py \
             src/audio_analyze/ltx_live_run.py \
+            src/audio_analyze/comfyui_image_pipeline.py \
+            tests/test_comfyui_image_pipeline.py \
             tests/test_local_ai_vision.py \
             tests/test_gemma_bounded_visual_contract.py \
             tests/test_gemma_prompt_retention.py \

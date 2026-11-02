@@ -62,6 +62,9 @@ jobs:
             tests/test_ltx_filename_hint_expander.py \
             tests/test_ltx_filename_hint_expander_ollama.py \
             tests/test_local_ai_client.py \
+            tests/test_local_ai_vision.py \
+            tests/test_gemma_bounded_visual_contract.py \
+            tests/test_comfyui_image_pipeline.py \
             tests/test_asmo_negative_prompt_memory.py \
             tests/test_ltx_tap_accent_sync.py \
             tests/test_ltx_prompt_budget.py \
