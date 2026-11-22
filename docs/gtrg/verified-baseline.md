@@ -41,3 +41,9 @@ These commands **do not** start ComfyUI, invoke Ollama, deploy to Modal, or incu
 - Cloud LTX-2.5 self-hosted/quantized weights are not guaranteed to produce the same visual quality as the hosted `ltx-2-3-pro` API. Compare with a retained favorite clip before choosing a cloud default.
 - A narrow `ltx_live_run.py` choreography profile contract validation was restored through [PR #90](https://github.com/justjerkinit247/Audio-Analyze/pull/90) at commit `d3e20f0f3be299a9eb640b76628ff38aa37b2437`. All six GitHub Actions workflows completed successfully for that merge commit. The beat/tap timing modules were unchanged.
 - Next safe action: obtain the actual latest `workflow_api.json` and representative successful run receipts from the Windows workstation; inventory custom nodes, weights, and input mapping offline. No GPU jobs until Modal account spending controls are independently confirmed.
+
+## Historical user-run result inventory (2026-11-22)
+
+The user inspected the local `outputs/ltx_video_run/live_runs/**/live_result.json` files after reinstalling Windows. The historical report showed **`ltx-2-3-pro` with guidance `12.0`** for multiple live attempts, including records marked `downloaded` on 2026-09-10 and 2026-08-11. Older 2026-07-25 records used guidance `9.0`; a 2026-07-09 record used `6.5`.
+
+The report's `VideoExists` field was `False` for all rows because no MP4 existed at the recorded `downloaded_mp4_resolved_path`. This does **not** prove the videos were never generated, nor identify whether they moved following OS reinstall. The original outputs must be located or a representative clip compared before a quality claim is made. Treat **12.0 as observed historical guidance, not an assumed optimum**. The rendering backend migration must preserve the audio/beat/tap timing semantics and not translate the hosted API's numeric guidance directly into another model's non-equivalent control without testing.
