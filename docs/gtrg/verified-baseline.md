@@ -33,3 +33,11 @@ python -m unittest discover -s tests -p test_asmo_narrative_timing.py -v
 ```
 
 These commands **do not** start ComfyUI, invoke Ollama, deploy to Modal, or incur GPU costs. Store secrets, songs, render outputs and model weights outside the Git repository.
+
+## Golden-run preservation and BeatSync compatibility (2026-11-22)
+
+- The original paid-generation route remains `run-ltx-live.cmd` and the existing `ltx_auto_audio_orchestrator.py` / `ltx_multi_scene_live_run.py`. Its checked-in `ltx_holy_cheeks_pipeline.py` sets model `ltx-2-3-pro`, guidance scale `9.0`, and default scene length `8.0` seconds. These are **repository defaults**, not a verified record of which exact run the user preferred.
+- Do not replace or retime `BeatGridEngine`, `ltx_beat_align_plan.py`, `tap_accent_sync.py`, `asmo_sync_calibrator.py` or the ASMO timeline injection. Keep their source timestamps and scene boundaries authoritative across any cloud-rendering adapter.
+- Cloud LTX-2.5 self-hosted/quantized weights are not guaranteed to produce the same visual quality as the hosted `ltx-2-3-pro` API. Compare with a retained favorite clip before choosing a cloud default.
+- A narrow `ltx_live_run.py` choreography profile contract validation was restored through [PR #90](https://github.com/justjerkinit247/Audio-Analyze/pull/90) at commit `d3e20f0f3be299a9eb640b76628ff38aa37b2437`. All six GitHub Actions workflows completed successfully for that merge commit. The beat/tap timing modules were unchanged.
+- Next safe action: obtain the actual latest `workflow_api.json` and representative successful run receipts from the Windows workstation; inventory custom nodes, weights, and input mapping offline. No GPU jobs until Modal account spending controls are independently confirmed.
