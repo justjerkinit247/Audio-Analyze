@@ -118,7 +118,7 @@ def test_reject_missing_sampler_reduction():
     try:
         m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
     except ValueError as exc:
-        assert "9-frame and 2-step" in str(exc)
+        assert "steps_or_sigmas_capped=False" in str(exc)
     else:
         raise AssertionError("Should not queue unreduced GPU generation")
 
@@ -226,3 +226,127 @@ def test_batch_size_forced_to_one_when_latent_nodes_support_it():
     assert tiny["8"]["inputs"]["batch_size"] == 1
     assert graph["7"]["inputs"]["batch_size"] == 4
     assert graph["8"]["inputs"]["batch_size"] == 2
+
+
+def make_custom_sigma_scenario():
+    graph, info = fixture()
+    graph["9"] = {
+        "class_type": "FloatToSigmas",
+        "inputs": {"values": "SECRET_FLOAT_VALUES"},
+    }
+    info.pop("LTXVScheduler")
+    info["FloatToSigmas"] = {
+        "input": {"required": {"values": ["STRING", {}]}},
+        "output": ["SIGMAS"],
+        "output_name": ["SIGMAS"],
+    }
+    graph["13"] = {
+        "class_type": "SamplerCustomAdvanced",
+        "inputs": {"sigmas": ["9", 0]},
+    }
+    info["SamplerCustomAdvanced"] = {
+        "input": {"required": {"sigmas": ["SIGMAS", {}]}},
+        "output": ["LATENT"],
+        "output_name": ["output"],
+    }
+    info["SplitSigmas"] = {
+        "input": {"required": {
+            "sigmas": ["SIGMAS", {}],
+            "step": ["INT", {"min": 0, "max": 10000}],
+        }},
+        "output": ["SIGMAS", "SIGMAS"],
+        "output_name": ["high_sigmas", "low_sigmas"],
+    }
+    return graph, info
+
+
+def test_advanced_custom_sampler_gets_split_sigmas_two_intervals():
+    graph, info = make_custom_sigma_scenario()
+    original = copy.deepcopy(graph)
+    tiny, report = m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    assert graph == original
+    assert report["custom_sampler_sigma_caps"] == 1
+    assert tiny["7"]["inputs"]["length"] == 9
+    assert tiny["13"]["inputs"]["sigmas"] == ["14", 0]
+    assert tiny["14"]["class_type"] == "SplitSigmas"
+    assert tiny["14"]["inputs"] == {"sigmas": ["9", 0], "step": 2}
+    assert not any(
+        "SECRET_FLOAT_VALUES" in json.dumps(change)
+        for change in report["changed_inputs"]
+    )
+
+
+def test_reject_custom_sampler_if_split_sigmas_unavailable():
+    graph, info = make_custom_sigma_scenario()
+    info.pop("SplitSigmas")
+    try:
+        m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    except ValueError as exc:
+        assert "SplitSigmas" in str(exc)
+    else:
+        raise AssertionError("Must not run without verified 2-interval SIGMAS cap")
+
+
+def test_reject_custom_sampler_if_source_output_not_sigmas():
+    graph, info = make_custom_sigma_scenario()
+    info["FloatToSigmas"]["output"] = ["FLOAT"]
+    try:
+        m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    except ValueError as exc:
+        assert "not a verified SIGMAS" in str(exc)
+    else:
+        raise AssertionError("Must not rewire non-SIGMAS typed output")
+
+
+def test_reject_custom_sampler_without_sigmas_link():
+    graph, info = make_custom_sigma_scenario()
+    graph["13"]["inputs"]["sigmas"] = "NOT_A_LINK"
+    try:
+        m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Must not fake a custom sampler link")
+
+
+def test_refuse_missing_numeric_or_custom_sigma_control():
+    graph, info = fixture()
+    graph["9"] = {
+        "class_type": "FloatToSigmas",
+        "inputs": {"values": "none"},
+    }
+    info.pop("LTXVScheduler")
+    info["FloatToSigmas"] = {
+        "input": {"required": {"values": ["STRING", {}]}},
+        "output": ["SIGMAS"],
+    }
+    try:
+        m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    except ValueError as exc:
+        assert "steps_or_sigmas_capped=False" in str(exc)
+    else:
+        raise AssertionError("Must not render with unconstrained sigma schedule")
+
+
+def test_temporary_graph_allows_only_9frame_handoff_override(monkeypatch):
+    graph, info = fixture()
+    actual_validator = m.validate_graph
+    calls = {"count": 0}
+
+    def validator_with_unrelated_error(data, details):
+        result = actual_validator(data, details)
+        calls["count"] += 1
+        if calls["count"] >= 2:
+            result["definite_blockers"].append({
+                "kind": "handoff_missing_or_wrong_source",
+                "handoff": "AAOFinishScene.original_soundtrack -> CreateVideo.audio",
+            })
+        return result
+
+    monkeypatch.setattr(m, "validate_graph", validator_with_unrelated_error)
+    try:
+        m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    except ValueError as exc:
+        assert "Temporary tiny graph failed API validation" in str(exc)
+    else:
+        raise AssertionError("Cannot waive a broken soundtrack connection")
