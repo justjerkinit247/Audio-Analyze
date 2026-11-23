@@ -149,9 +149,10 @@ def _cap_custom_sampler_sigmas(graph: dict[str, dict], info: dict, changes: list
 
 
 def _repeat_preview_images_for_finish(
-    graph: dict[str, dict], info: dict, changes: list[dict], expected_frames: int
+    graph: dict[str, dict], info: dict, changes: list[dict],
+    expected_frames: int, generated_frames: int,
 ) -> int:
-    """Extend a nine-frame *preview* batch for FinishScene's full-duration audio.
+    """Extend short previews for FinishScene; preserve genuine full renders.
 
     This only rewires the temporary API graph. It never changes the planner,
     production FinishScene validation, or original soundtrack connection.
@@ -176,7 +177,7 @@ def _repeat_preview_images_for_finish(
             or source_slot < 0 or source_slot >= len(source_types)
             or source_types[source_slot] != "IMAGE"):
         raise ValueError("AAOFinishScene image source is not registered as IMAGE")
-    repeats = (expected_frames + FRAMES - 1) // FRAMES
+    repeats = (expected_frames + generated_frames - 1) // generated_frames
     if repeats == 1:
         return 1
     spec = info.get("RepeatImageBatch")
@@ -200,7 +201,7 @@ def _repeat_preview_images_for_finish(
         "node_id": finish_id,
         "class_type": "AAOFinishScene",
         "input_name": "images",
-        "new_value": f"nine-frame preview repeated {repeats}x to cover {expected_frames} frames",
+        "new_value": f"{generated_frames}-frame preview repeated {repeats}x to cover {expected_frames} frames",
         "was_graph_link": True,
     })
     return repeats
@@ -208,9 +209,11 @@ def _repeat_preview_images_for_finish(
 
 def build_tiny(
     graph: dict[str, dict], info: dict, prefix: str,
-    *, expected_finish_frames: int | None = None,
+    *, expected_finish_frames: int | None = None, render_frames: int = FRAMES,
 ) -> tuple[dict, dict]:
-    """Patch a disconnected low-resource render *copy*; no original edits."""
+    """Patch a constrained render *copy*; never mutate the original API graph."""
+    if render_frames not in (9, 57):
+        raise ValueError("This controlled test supports only 9 or 57 generated frames")
     approved = validate_graph(graph, info)
     if approved["status"] != "READY_FOR_CONTROLLED_LOCAL_TEST":
         raise ValueError("Original API graph must pass strict GTRG API preflight first")
@@ -239,11 +242,11 @@ def build_tiny(
         cls, inputs = node["class_type"], node["inputs"]
         targets: dict[str, int] = {}
         if cls in LATENT_VIDEO:
-            targets.update({"width": WIDTH, "height": HEIGHT, "length": FRAMES, "batch_size": 1})
+            targets.update({"width": WIDTH, "height": HEIGHT, "length": render_frames, "batch_size": 1})
         if cls in IMAGE_PREPROCESS:
             targets.update({"width": WIDTH, "height": HEIGHT})
         if cls in LATENT_AUDIO:
-            targets.update({"frames_number": FRAMES, "batch_size": 1})
+            targets.update({"frames_number": render_frames, "batch_size": 1})
         if cls in SAMPLERS or cls.endswith("Scheduler"):
             targets.update({"steps": STEPS, "num_steps": STEPS})
         for key, target in targets.items():
@@ -279,7 +282,7 @@ def build_tiny(
     custom_sigma_caps = _cap_custom_sampler_sigmas(clone, info, changes)
     preview_repetitions = (
         _repeat_preview_images_for_finish(
-            clone, info, changes, expected_finish_frames
+            clone, info, changes, expected_finish_frames, render_frames
         ) if expected_finish_frames is not None else 0
     )
     if reduced_video < 1 or saved_prefix < 1 or (
@@ -292,9 +295,8 @@ def build_tiny(
             f"output_prefix_found={bool(saved_prefix)}. "
             "No job was submitted."
         )
-    # The one intentional handoff break: replace the original linked
-    # render_frames value with a literal nine-frame cap in this temporary
-    # graph. All remaining required handoffs and input contracts stay strict.
+    # Replace linked render_frames with a bounded 9/57-frame value only in the
+    # temporary graph. The production FinishScene guard and other handoffs stay.
     allowed_override = (
         "AAOSceneRenderInputs.render_frames -> EmptyLTXVLatentVideo.length"
     )
@@ -305,7 +307,7 @@ def build_tiny(
             and blocker.get("handoff") == allowed_override
             and any(
                 node["class_type"] == "EmptyLTXVLatentVideo"
-                and node["inputs"].get("length") == FRAMES
+                and node["inputs"].get("length") == render_frames
                 for node in clone.values()
             )
         )
@@ -320,7 +322,7 @@ def build_tiny(
         raise ValueError("Audio latent length could not be constrained")
     return clone, {
         "nodes": len(clone),
-        "video_frames": FRAMES,
+        "video_frames": render_frames,
         "steps": STEPS,
         "resolution": f"{WIDTH}x{HEIGHT}",
         "audio_frames_constrained": audio_frames,
@@ -328,6 +330,7 @@ def build_tiny(
         "expected_finish_frames": expected_finish_frames,
         "preview_image_batch_repetitions": preview_repetitions,
         "preview_uses_repeated_motion": preview_repetitions > 1,
+        "genuine_frames_for_output": min(render_frames, expected_finish_frames or render_frames),
         "new_prefix": prefix,
         "changed_inputs": changes,
         "original_graph_handoffs_preserved_in_source": True,
@@ -466,6 +469,10 @@ def main() -> int:
     )
     p.add_argument("--max-runtime-seconds", type=int, default=600)
     p.add_argument(
+        "--render-frames", type=int, choices=(9, 57), default=9,
+        help="Nine-frame cheap preview or 57 actual LTX frames (trimmed to 51).",
+    )
+    p.add_argument(
         "--expected-finish-frames", type=int, required=True,
         help="Original scene frame count reported by AAOFinishScene "
              "(51 in the observed local test); required to pad only the "
@@ -474,8 +481,10 @@ def main() -> int:
     p.add_argument("--run", action="store_true",
                    help="Explicitly authorize one small local GPU generation")
     args = p.parse_args()
-    if not 60 <= args.max_runtime_seconds <= 3600:
-        p.error("Runtime limit must be 60-3600 seconds")
+    if not 60 <= args.max_runtime_seconds <= 7200:
+        p.error("Runtime limit must be 60-7200 seconds")
+    if args.render_frames == 57 and args.expected_finish_frames != 51:
+        p.error("57-frame full test requires the verified 51-frame scene contract")
     if not args.api.is_file():
         p.error("Corrected local API graph not found")
     if args.api.stat().st_size > 15 * 1024 * 1024:
@@ -486,15 +495,17 @@ def main() -> int:
         info = get_object_info(BASE)
         raw = json.loads(args.api.read_text(encoding="utf-8-sig"))
         graph = read_api_graph(raw)
-        prefix = "GTRG_Tiny_9f_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        label = "GTRG_Full_57f_" if args.render_frames == 57 else "GTRG_Tiny_9f_"
+        prefix = label + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         tiny, summary = build_tiny(
-            graph, info, prefix, expected_finish_frames=args.expected_finish_frames
+            graph, info, prefix, expected_finish_frames=args.expected_finish_frames,
+            render_frames=args.render_frames,
         )
         if not queue_empty():
             raise RuntimeError("ComfyUI is busy; no test started")
         args.report.parent.mkdir(parents=True, exist_ok=True)
         report: dict[str, Any] = {
-            "schema": "gtrg_native_9frame_local_test_v1",
+            "schema": "gtrg_native_local_frame_canary_v2",
             "mode": "LOCAL_RENDER" if args.run else "DRY_RUN_NO_GPU",
             "source_file_changed": False,
             "cloud_calls": 0,
@@ -516,15 +527,22 @@ def main() -> int:
     except (OSError, URLError, ValueError, RuntimeError, TypeError) as exc:
         print(f"Test stopped safely: {type(exc).__name__}: {exc}")
         return 3
-    print("=== GTRG TINY LOCAL LTX 2.3 VIDEO CANARY ===")
+    print("=== GTRG LOCAL LTX 2.3 VIDEO CANARY ===")
     print(f"Mode: {report['mode']}")
-    print(f"Resolution: {WIDTH}x{HEIGHT}, frames: {FRAMES}, sampler steps: {STEPS}")
-    print(
-        "Preview extension: " + str(summary["preview_image_batch_repetitions"])
-        + "x repeated nine-frame sequence for FinishScene "
-        + str(summary["expected_finish_frames"]) + "-frame audio"
-    )
-    print("Preview motion repeats; not an original full-length diffusion render.")
+    print(f"Resolution: {WIDTH}x{HEIGHT}, generated frames: {args.render_frames}, sampler steps: {STEPS}")
+    if summary["preview_uses_repeated_motion"]:
+        print(
+            "Preview extension: " + str(summary["preview_image_batch_repetitions"])
+            + "x repetitions for FinishScene "
+            + str(summary["expected_finish_frames"]) + "-frame audio"
+        )
+        print("Preview motion repeats; not an original full-length diffusion render.")
+    else:
+        print(
+            "No repeated frames. FinishScene trims the genuinely generated "
+            + str(args.render_frames) + " frames to "
+            + str(args.expected_finish_frames) + " frames."
+        )
     print(f"Changed numeric inputs: {len(summary['changed_inputs'])}")
     for changed in summary["changed_inputs"]:
         print(
