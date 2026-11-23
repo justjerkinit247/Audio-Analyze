@@ -350,3 +350,61 @@ def test_temporary_graph_allows_only_9frame_handoff_override(monkeypatch):
         assert "Temporary tiny graph failed API validation" in str(exc)
     else:
         raise AssertionError("Cannot waive a broken soundtrack connection")
+
+
+def test_repeat_nine_frame_preview_to_meet_51_frame_finish_without_relaxing_checks():
+    graph, info = fixture()
+    graph["10"]["inputs"]["images"] = ["17", 0]
+    graph["17"] = {"class_type": "VAEDecode", "inputs": {}}
+    info["VAEDecode"] = {
+        "input": {"required": {}},
+        "output": ["IMAGE"], "output_name": ["IMAGE"],
+    }
+    info["RepeatImageBatch"] = {
+        "input": {"required": {
+            "image": ["IMAGE", {}], "amount": ["INT", {"min": 1, "max": 4096}],
+        }},
+        "output": ["IMAGE"], "output_name": ["IMAGE"],
+    }
+    original = copy.deepcopy(graph)
+    tiny, report = m.build_tiny(
+        graph, info, "GTRG_Tiny_9f_test", expected_finish_frames=51
+    )
+    assert graph == original
+    assert tiny["7"]["inputs"]["length"] == 9
+    assert tiny["11"]["inputs"]["audio"] == ["10", 2]
+    assert report["expected_finish_frames"] == 51
+    assert report["preview_image_batch_repetitions"] == 6
+    assert report["preview_uses_repeated_motion"]
+    repeat_id, output_slot = tiny["10"]["inputs"]["images"]
+    assert output_slot == 0
+    assert tiny[repeat_id] == {
+        "class_type": "RepeatImageBatch",
+        "inputs": {"image": ["17", 0], "amount": 6},
+    }
+
+
+def test_preview_repeat_fails_before_gpu_if_comfy_lacks_repeat_node():
+    graph, info = fixture()
+    graph["10"]["inputs"]["images"] = ["17", 0]
+    graph["17"] = {"class_type": "VAEDecode", "inputs": {}}
+    info["VAEDecode"] = {
+        "input": {"required": {}},
+        "output": ["IMAGE"], "output_name": ["IMAGE"],
+    }
+    try:
+        m.build_tiny(graph, info, "GTRG_Tiny_9f_test", expected_finish_frames=51)
+    except ValueError as exc:
+        assert "RepeatImageBatch unavailable" in str(exc)
+    else:
+        raise AssertionError("Should refuse a GPU run if safe frame extension is unavailable")
+
+
+def test_preview_rejects_excessive_expected_frames():
+    graph, info = fixture()
+    try:
+        m.build_tiny(graph, info, "GTRG_Tiny_9f_test", expected_finish_frames=1000)
+    except ValueError as exc:
+        assert "9-120" in str(exc)
+    else:
+        raise AssertionError("Should bound preview frame repetition")
