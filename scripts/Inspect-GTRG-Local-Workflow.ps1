@@ -87,15 +87,28 @@ foreach ($name in $interesting) {
     $def = $entry.Value
     $needed = @()
     $optional = @()
-    if ($null -ne $def.PSObject.Properties['input']) {
-        $needed = @(Get-PropertyNames $def.input.required)
-        $optional = @(Get-PropertyNames $def.input.optional)
+    $outputCount = 0
+    $inputProperty = $def.PSObject.Properties['input']
+    if ($null -ne $inputProperty -and $null -ne $inputProperty.Value) {
+        $inputBlock = $inputProperty.Value
+        $requiredProperty = $inputBlock.PSObject.Properties['required']
+        $optionalProperty = $inputBlock.PSObject.Properties['optional']
+        if ($null -ne $requiredProperty) {
+            $needed = @(Get-PropertyNames $requiredProperty.Value)
+        }
+        if ($null -ne $optionalProperty) {
+            $optional = @(Get-PropertyNames $optionalProperty.Value)
+        }
+    }
+    $outputProperty = $def.PSObject.Properties['output']
+    if ($null -ne $outputProperty -and $null -ne $outputProperty.Value) {
+        $outputCount = @($outputProperty.Value).Count
     }
     $contracts += [pscustomobject]@{
         class_type = $name
         required_inputs = $needed
         optional_inputs = $optional
-        output_count = @($def.output).Count
+        output_count = $outputCount
     }
 }
 Write-Host "Node interfaces captured: $($contracts.Count)"
