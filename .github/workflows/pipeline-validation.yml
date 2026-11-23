@@ -66,6 +66,7 @@ jobs:
             tests/test_ltx_tap_accent_sync.py \
             tests/test_ltx_prompt_budget.py \
             tests/test_ltx_live_run.py \
+            tests/test_ltx_client_v2.py \
             tests/test_gtrg_tiny_ltx_local.py
 
       - name: Create deterministic CI media fixtures

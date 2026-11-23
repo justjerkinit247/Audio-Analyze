@@ -67,7 +67,7 @@ def test_ltx_plan_preflight_and_dry_run_submit(tmp_path):
     assert result["dry_run"] is True
     assert result["live"] is False
     assert Path(result["scene_audio_path"]).exists()
-    assert result["ltx_result"]["endpoint"] == "/v1/audio-to-video"
+    assert result["ltx_result"]["endpoint"] == "/v2/audio-to-video"
     assert result["ltx_result"]["payload"]["model"] == "ltx-2-3-pro"
     assert result["ltx_result"]["payload"]["resolution"] == "1080x1920"
 
