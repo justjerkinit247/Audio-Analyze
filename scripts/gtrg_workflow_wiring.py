@@ -100,7 +100,7 @@ def parse_gui_workflow(document: dict) -> tuple[list[dict], list[dict]]:
             "to_id": target_id,
             "to_type": nodes[target_id]["class_type"],
             "to_category": nodes[target_id]["category"],
-            "input_port": _port_name(dst.get("inputs"), target_slot, "slot"),
+            "input_port": _port_name(dst.get("inputs"), target_slot, "input"),
         })
     return list(nodes.values()), edges
 
