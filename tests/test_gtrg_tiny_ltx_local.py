@@ -326,3 +326,27 @@ def test_refuse_missing_numeric_or_custom_sigma_control():
         assert "steps_or_sigmas_capped=False" in str(exc)
     else:
         raise AssertionError("Must not render with unconstrained sigma schedule")
+
+
+def test_temporary_graph_allows_only_9frame_handoff_override(monkeypatch):
+    graph, info = fixture()
+    actual_validator = m.validate_graph
+    calls = {"count": 0}
+
+    def validator_with_unrelated_error(data, details):
+        result = actual_validator(data, details)
+        calls["count"] += 1
+        if calls["count"] >= 2:
+            result["definite_blockers"].append({
+                "kind": "handoff_missing_or_wrong_source",
+                "handoff": "AAOFinishScene.original_soundtrack -> CreateVideo.audio",
+            })
+        return result
+
+    monkeypatch.setattr(m, "validate_graph", validator_with_unrelated_error)
+    try:
+        m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    except ValueError as exc:
+        assert "Temporary tiny graph failed API validation" in str(exc)
+    else:
+        raise AssertionError("Cannot waive a broken soundtrack connection")
