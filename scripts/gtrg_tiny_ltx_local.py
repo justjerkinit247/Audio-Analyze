@@ -118,7 +118,7 @@ def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, d
             targets.update({"width": WIDTH, "height": HEIGHT})
         if cls in LATENT_AUDIO:
             targets.update({"frames_number": FRAMES})
-        if cls in SAMPLERS:
+        if cls in SAMPLERS or cls.endswith("Scheduler"):
             targets.update({"steps": STEPS, "num_steps": STEPS})
         for key, target in targets.items():
             if key not in inputs:
@@ -139,7 +139,7 @@ def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, d
                 reduced_video += 1
             if cls in LATENT_AUDIO and key == "frames_number":
                 audio_frames += 1
-            if cls in SAMPLERS and key in {"steps", "num_steps"}:
+            if (cls in SAMPLERS or cls.endswith("Scheduler")) and key in {"steps", "num_steps"}:
                 reduced_steps += 1
 
         if cls == "SaveVideo":
