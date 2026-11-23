@@ -148,7 +148,68 @@ def _cap_custom_sampler_sigmas(graph: dict[str, dict], info: dict, changes: list
     return count
 
 
-def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, dict]:
+def _repeat_preview_images_for_finish(
+    graph: dict[str, dict], info: dict, changes: list[dict], expected_frames: int
+) -> int:
+    """Extend a nine-frame *preview* batch for FinishScene's full-duration audio.
+
+    This only rewires the temporary API graph. It never changes the planner,
+    production FinishScene validation, or original soundtrack connection.
+    Repeated motion is deliberately NOT equivalent to a full render.
+    """
+    if not FRAMES <= expected_frames <= 120:
+        raise ValueError("Expected FinishScene frame count must be 9-120 for preview safety")
+    targets = [
+        (node_id, node) for node_id, node in graph.items()
+        if node["class_type"] == "AAOFinishScene"
+    ]
+    if len(targets) != 1:
+        raise ValueError("Preview must contain exactly one AAOFinishScene")
+    finish_id, finish_node = targets[0]
+    link = get_link(finish_node["inputs"].get("images"), graph)
+    if link is None:
+        raise ValueError("AAOFinishScene.images has no verified input link")
+    source_id, source_slot = link
+    source_cls = graph[source_id]["class_type"]
+    source_types = info.get(source_cls, {}).get("output")
+    if (not isinstance(source_types, list)
+            or source_slot < 0 or source_slot >= len(source_types)
+            or source_types[source_slot] != "IMAGE"):
+        raise ValueError("AAOFinishScene image source is not registered as IMAGE")
+    repeats = (expected_frames + FRAMES - 1) // FRAMES
+    if repeats == 1:
+        return 1
+    spec = info.get("RepeatImageBatch")
+    if not isinstance(spec, dict):
+        raise ValueError("RepeatImageBatch unavailable; cannot satisfy FinishScene safely")
+    image_input = _input_spec(info, "RepeatImageBatch", "image")
+    if not isinstance(image_input, list) or image_input[0] != "IMAGE":
+        raise ValueError("RepeatImageBatch.image is not an IMAGE input")
+    if not _within_range(_input_spec(info, "RepeatImageBatch", "amount"), repeats):
+        raise ValueError("RepeatImageBatch.amount cannot satisfy expected frame count")
+    outputs = spec.get("output")
+    if not isinstance(outputs, list) or not outputs or outputs[0] != "IMAGE":
+        raise ValueError("RepeatImageBatch has no verified IMAGE output")
+    node_id = str(max((int(k) for k in graph if k.isdigit()), default=0) + 1)
+    graph[node_id] = {
+        "class_type": "RepeatImageBatch",
+        "inputs": {"image": [source_id, source_slot], "amount": repeats},
+    }
+    finish_node["inputs"]["images"] = [node_id, 0]
+    changes.append({
+        "node_id": finish_id,
+        "class_type": "AAOFinishScene",
+        "input_name": "images",
+        "new_value": f"nine-frame preview repeated {repeats}x to cover {expected_frames} frames",
+        "was_graph_link": True,
+    })
+    return repeats
+
+
+def build_tiny(
+    graph: dict[str, dict], info: dict, prefix: str,
+    *, expected_finish_frames: int | None = None,
+) -> tuple[dict, dict]:
     """Patch a disconnected low-resource render *copy*; no original edits."""
     approved = validate_graph(graph, info)
     if approved["status"] != "READY_FOR_CONTROLLED_LOCAL_TEST":
@@ -216,6 +277,11 @@ def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, d
             saved_prefix += 1
 
     custom_sigma_caps = _cap_custom_sampler_sigmas(clone, info, changes)
+    preview_repetitions = (
+        _repeat_preview_images_for_finish(
+            clone, info, changes, expected_finish_frames
+        ) if expected_finish_frames is not None else 0
+    )
     if reduced_video < 1 or saved_prefix < 1 or (
         reduced_steps < 1 and custom_sigma_caps < 1
     ):
@@ -259,6 +325,9 @@ def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, d
         "resolution": f"{WIDTH}x{HEIGHT}",
         "audio_frames_constrained": audio_frames,
         "custom_sampler_sigma_caps": custom_sigma_caps,
+        "expected_finish_frames": expected_finish_frames,
+        "preview_image_batch_repetitions": preview_repetitions,
+        "preview_uses_repeated_motion": preview_repetitions > 1,
         "new_prefix": prefix,
         "changed_inputs": changes,
         "original_graph_handoffs_preserved_in_source": True,
@@ -396,6 +465,12 @@ def main() -> int:
         / "outputs" / "gtrg_local_smoke" / "gtrg_tiny_video_result.json",
     )
     p.add_argument("--max-runtime-seconds", type=int, default=600)
+    p.add_argument(
+        "--expected-finish-frames", type=int, required=True,
+        help="Original scene frame count reported by AAOFinishScene "
+             "(51 in the observed local test); required to pad only the "
+             "temporary preview, never production renders.",
+    )
     p.add_argument("--run", action="store_true",
                    help="Explicitly authorize one small local GPU generation")
     args = p.parse_args()
@@ -412,7 +487,9 @@ def main() -> int:
         raw = json.loads(args.api.read_text(encoding="utf-8-sig"))
         graph = read_api_graph(raw)
         prefix = "GTRG_Tiny_9f_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        tiny, summary = build_tiny(graph, info, prefix)
+        tiny, summary = build_tiny(
+            graph, info, prefix, expected_finish_frames=args.expected_finish_frames
+        )
         if not queue_empty():
             raise RuntimeError("ComfyUI is busy; no test started")
         args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -442,6 +519,12 @@ def main() -> int:
     print("=== GTRG TINY LOCAL LTX 2.3 VIDEO CANARY ===")
     print(f"Mode: {report['mode']}")
     print(f"Resolution: {WIDTH}x{HEIGHT}, frames: {FRAMES}, sampler steps: {STEPS}")
+    print(
+        "Preview extension: " + str(summary["preview_image_batch_repetitions"])
+        + "x repeated nine-frame sequence for FinishScene "
+        + str(summary["expected_finish_frames"]) + "-frame audio"
+    )
+    print("Preview motion repeats; not an original full-length diffusion render.")
     print(f"Changed numeric inputs: {len(summary['changed_inputs'])}")
     for changed in summary["changed_inputs"]:
         print(
