@@ -48,7 +48,8 @@ def http_json(route: str, data: dict | None = None, *, timeout: int = 20) -> Any
         method="POST" if data is not None else "GET",
     )
     with urlopen(request, timeout=timeout) as response:
-        return json.load(response) if response.status != 204 and response.length != 0 else {}
+        raw = response.read()
+        return json.loads(raw) if raw.strip() else {}
 
 
 def _within_range(spec: Any, proposed: int) -> bool:
