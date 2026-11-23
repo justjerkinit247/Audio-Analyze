@@ -408,3 +408,39 @@ def test_preview_rejects_excessive_expected_frames():
         assert "9-120" in str(exc)
     else:
         raise AssertionError("Should bound preview frame repetition")
+
+
+def test_full_57_generated_frames_trim_to_51_without_repeat():
+    graph, info = fixture()
+    graph["10"]["inputs"]["images"] = ["17", 0]
+    graph["17"] = {"class_type": "VAEDecode", "inputs": {}}
+    info["VAEDecode"] = {
+        "input": {"required": {}},
+        "output": ["IMAGE"], "output_name": ["IMAGE"],
+    }
+    original = copy.deepcopy(graph)
+    full, summary = m.build_tiny(
+        graph, info, "GTRG_Full_57f_test",
+        expected_finish_frames=51, render_frames=57,
+    )
+    assert graph == original
+    assert len(full) == len(graph)
+    assert full["7"]["inputs"]["length"] == 57
+    assert full["8"]["inputs"]["frames_number"] == 57
+    assert full["9"]["inputs"]["steps"] == 2
+    assert full["10"]["inputs"]["images"] == ["17", 0]
+    assert full["11"]["inputs"]["audio"] == ["10", 2]
+    assert summary["video_frames"] == 57
+    assert summary["genuine_frames_for_output"] == 51
+    assert summary["preview_image_batch_repetitions"] == 1
+    assert not summary["preview_uses_repeated_motion"]
+
+
+def test_full_render_rejects_other_frame_counts():
+    graph, info = fixture()
+    try:
+        m.build_tiny(graph, info, "bad", expected_finish_frames=51, render_frames=51)
+    except ValueError as exc:
+        assert "only 9 or 57" in str(exc)
+    else:
+        raise AssertionError("Must not submit invalid LTX 51-frame latent")
