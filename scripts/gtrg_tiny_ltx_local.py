@@ -20,7 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from gtrg_api_preflight import get_object_info, read_api_graph, validate_graph
+from gtrg_api_preflight import get_object_info, read_api_graph, validate_graph, get_link
 
 BASE = "http://127.0.0.1:8188"
 WIDTH, HEIGHT, FRAMES, STEPS = 288, 512, 9, 2
@@ -81,6 +81,71 @@ def _input_spec(info: dict, cls: str, key: str) -> Any:
         if isinstance(ports, dict) and key in ports:
             return ports[key]
     return None
+
+
+def _cap_custom_sampler_sigmas(graph: dict[str, dict], info: dict, changes: list[dict]) -> int:
+    """Bound custom samplers using ComfyUI's native SplitSigmas high output.
+
+    SplitSigmas(high, step=2) yields sigmas[:3], i.e. 2 sampling intervals.
+    The original producer and saved API file remain unchanged; only a temporary
+    graph copy is rewired. All sampler sigma sources must be registered SIGMAS.
+    """
+    custom = [
+        (node_id, node) for node_id, node in list(graph.items())
+        if node["class_type"] in {"SamplerCustomAdvanced", "SamplerCustom"}
+    ]
+    if not custom:
+        return 0
+
+    splitter = info.get("SplitSigmas")
+    if not isinstance(splitter, dict):
+        raise ValueError("ComfyUI SplitSigmas is not registered: cannot cap custom sampling")
+    if not _within_range(_input_spec(info, "SplitSigmas", "step"), STEPS):
+        raise ValueError("SplitSigmas.step does not support 2 intervals")
+    expected_input = _input_spec(info, "SplitSigmas", "sigmas")
+    if not isinstance(expected_input, list) or expected_input[0] != "SIGMAS":
+        raise ValueError("SplitSigmas.sigmas input has incompatible type")
+    output_types = splitter.get("output")
+    if not isinstance(output_types, list) or not output_types or output_types[0] != "SIGMAS":
+        raise ValueError("SplitSigmas first output is not SIGMAS")
+
+    next_id = max(
+        (int(key) for key in graph if key.isdigit()), default=0
+    ) + 1
+    count = 0
+    for node_id, node in custom:
+        cls = node["class_type"]
+        input_spec = _input_spec(info, cls, "sigmas")
+        if not isinstance(input_spec, list) or input_spec[0] != "SIGMAS":
+            raise ValueError(f"{cls} does not expose a SIGMAS input")
+        original = node["inputs"].get("sigmas")
+        sigma_link = get_link(original, graph)
+        if sigma_link is None:
+            raise ValueError(f"{cls}.sigmas is not a valid graph connection")
+        upstream_id, slot = sigma_link
+        upstream_class = graph[upstream_id]["class_type"]
+        upstream_outputs = info.get(upstream_class, {}).get("output")
+        if (not isinstance(upstream_outputs, list) or slot < 0
+                or slot >= len(upstream_outputs)
+                or upstream_outputs[slot] != "SIGMAS"):
+            raise ValueError(f"{cls} upstream output is not a verified SIGMAS source")
+
+        new_id = str(next_id)
+        next_id += 1
+        graph[new_id] = {
+            "class_type": "SplitSigmas",
+            "inputs": {"sigmas": [upstream_id, slot], "step": STEPS},
+        }
+        node["inputs"]["sigmas"] = [new_id, 0]
+        changes.append({
+            "node_id": node_id,
+            "class_type": cls,
+            "input_name": "sigmas",
+            "new_value": "first two intervals via SplitSigmas",
+            "was_graph_link": True,
+        })
+        count += 1
+    return count
 
 
 def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, dict]:
@@ -150,8 +215,19 @@ def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, d
             inputs["filename_prefix"] = prefix
             saved_prefix += 1
 
-    if reduced_video < 1 or reduced_steps < 1 or saved_prefix < 1:
-        raise ValueError("Could not verify 9-frame and 2-step rendering controls")
+    custom_sigma_caps = _cap_custom_sampler_sigmas(clone, info, changes)
+    if reduced_video < 1 or saved_prefix < 1 or (
+        reduced_steps < 1 and custom_sigma_caps < 1
+    ):
+        raise ValueError(
+            "Could not verify the minimum render controls: "
+            f"video_length_found={bool(reduced_video)}, "
+            f"steps_or_sigmas_capped={bool(reduced_steps or custom_sigma_caps)}, "
+            f"output_prefix_found={bool(saved_prefix)}. "
+            "No job was submitted."
+        )
+    if validate_graph(clone, info)["definite_blockers"]:
+        raise ValueError("Temporary tiny graph failed API validation; no job submitted")
     if "LTXVEmptyLatentAudio" in classes and audio_frames < 1:
         raise ValueError("Audio latent length could not be constrained")
     return clone, {
@@ -160,6 +236,7 @@ def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, d
         "steps": STEPS,
         "resolution": f"{WIDTH}x{HEIGHT}",
         "audio_frames_constrained": audio_frames,
+        "custom_sampler_sigma_caps": custom_sigma_caps,
         "new_prefix": prefix,
         "changed_inputs": changes,
         "original_graph_handoffs_preserved_in_source": True,
