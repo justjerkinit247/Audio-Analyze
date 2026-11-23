@@ -1,6 +1,7 @@
 from pathlib import Path
 import mimetypes
 import os
+import time
 import requests
 
 
@@ -9,7 +10,9 @@ class LTXError(RuntimeError):
 
 
 class LTXClient:
-    BASE_URL = "https://api.ltx.video"
+    BASE_URL = "https://api.ltx.io"
+    POLL_INTERVAL_SECONDS = 5.0
+    MAX_POLL_SECONDS = 1800.0
 
     def __init__(self, api_key=None):
         self.api_key = api_key or os.environ.get("LTXV_API_KEY")
@@ -38,34 +41,10 @@ class LTXClient:
         raise LTXError(f"{label} failed: HTTP {response.status_code}\n{detail}")
 
     def _request_upload_slot(self, file_path):
-        """
-        Ask LTX for a signed upload URL.
-
-        LTX currently returns data shaped like:
-            {
-              "upload_url": "https://storage.googleapis.com/...",
-              "storage_uri": "ltx://...",
-              "required_headers": {"x-goog-content-length-range": "0,104857600"}
-            }
-
-        The generation endpoint wants the returned storage_uri, not the signed upload_url.
-        """
-        file_size = file_path.stat().st_size
-        mime_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-        payload = {
-            "filename": file_path.name,
-            "file_name": file_path.name,
-            "size_bytes": file_size,
-            "content_type": mime_type,
-            "mime_type": mime_type,
-        }
-
-        # Some LTX accounts accept JSON metadata. If the endpoint ignores metadata,
-        # the response shape still provides upload_url/storage_uri.
+        """Request a presigned upload URL; /v1/upload remains valid for V2 jobs."""
         response = self.session.post(
             f"{self.BASE_URL}/v1/upload",
-            headers=self.json_headers,
-            json=payload,
+            headers=self.auth_headers,
             timeout=(20, 180),
         )
         self._check(response, "LTX upload slot request")
@@ -155,6 +134,73 @@ class LTXClient:
 
         return data
 
+    def _submit_async_video(self, endpoint, payload, output_path):
+        """Submit a single V2 job, poll it, then download its MP4.
+
+        Never resubmit after receiving a job ID: a status/download failure can
+        occur after generation has been billed. The ID is included in errors
+        so the existing run report can be used for manual recovery.
+        """
+        response = self.session.post(
+            f"{self.BASE_URL}/v2/{endpoint}",
+            headers=self.json_headers,
+            json=payload,
+            timeout=(20, 120),
+        )
+        self._check(response, f"LTX {endpoint} submission")
+        job = response.json()
+        job_id = job.get("id") if isinstance(job, dict) else None
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise LTXError(
+                f"LTX {endpoint} response has no job ID; check the provider "
+                "before retrying to avoid a duplicate charge."
+            )
+
+        status_url = f"{self.BASE_URL}/v2/{endpoint}/{job_id}"
+        deadline = time.monotonic() + self.MAX_POLL_SECONDS
+        while True:
+            if time.monotonic() >= deadline:
+                raise LTXError(
+                    f"LTX {endpoint} job {job_id} polling timed out; "
+                    "check this job before submitting another."
+                )
+            time.sleep(self.POLL_INTERVAL_SECONDS)
+            poll = self.session.get(
+                status_url, headers=self.auth_headers, timeout=(20, 90)
+            )
+            self._check(poll, f"LTX {endpoint} job {job_id} status")
+            state = poll.json()
+            if not isinstance(state, dict):
+                raise LTXError(f"LTX {endpoint} job {job_id}: invalid status response")
+            status = state.get("status")
+            if status == "failed":
+                error = state.get("error") or {}
+                detail = error.get("message", str(error)) if isinstance(error, dict) else str(error)
+                raise LTXError(f"LTX {endpoint} job {job_id} failed: {detail}")
+            if status == "completed":
+                break
+            if status not in ("pending", "processing"):
+                raise LTXError(
+                    f"LTX {endpoint} job {job_id}: unknown status {status!r}"
+                )
+
+        video_url = self._extract_video_url(state)
+        if not isinstance(video_url, str) or not video_url:
+            raise LTXError(f"LTX {endpoint} job {job_id}: missing result.video_url")
+        downloaded = self.session.get(video_url, timeout=(20, 300))
+        self._check(downloaded, f"LTX {endpoint} job {job_id} download")
+        if not downloaded.content:
+            raise LTXError(f"LTX {endpoint} job {job_id}: downloaded video is empty")
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(downloaded.content)
+        return {
+            "status": "downloaded",
+            "downloaded_mp4": str(output.resolve()),
+            "job_id": job_id,
+            "api_version": "v2",
+        }
+
     def image_to_video(self, image_uri, prompt, output_path, model="ltx-2-3-pro", duration=8, resolution="1080x1920", fps=24, guidance_scale=9.0, dry_run=False):
         payload = {
             "image_uri": self.ensure_uri(image_uri) if not dry_run else str(image_uri),
@@ -167,10 +213,8 @@ class LTXClient:
             "generate_audio": False,
         }
         if dry_run:
-            return {"status": "dry_run", "endpoint": "/v1/image-to-video", "payload": payload, "output_path": str(Path(output_path).resolve())}
-        response = self.session.post(f"{self.BASE_URL}/v1/image-to-video", headers=self.json_headers, json=payload, timeout=(20, 600))
-        self._check(response, "LTX image-to-video")
-        return self._save_response(response, output_path)
+            return {"status": "dry_run", "endpoint": "/v2/image-to-video", "payload": payload, "output_path": str(Path(output_path).resolve())}
+        return self._submit_async_video("image-to-video", payload, output_path)
 
     def audio_to_video(self, audio_uri, prompt, output_path, image_uri=None, model="ltx-2-3-pro", resolution="1080x1920", guidance_scale=9.0, dry_run=False):
         payload = {
@@ -183,7 +227,5 @@ class LTXClient:
         if image_uri:
             payload["image_uri"] = self.ensure_uri(image_uri) if not dry_run else str(image_uri)
         if dry_run:
-            return {"status": "dry_run", "endpoint": "/v1/audio-to-video", "payload": payload, "output_path": str(Path(output_path).resolve())}
-        response = self.session.post(f"{self.BASE_URL}/v1/audio-to-video", headers=self.json_headers, json=payload, timeout=(20, 600))
-        self._check(response, "LTX audio-to-video")
-        return self._save_response(response, output_path)
+            return {"status": "dry_run", "endpoint": "/v2/audio-to-video", "payload": payload, "output_path": str(Path(output_path).resolve())}
+        return self._submit_async_video("audio-to-video", payload, output_path)
