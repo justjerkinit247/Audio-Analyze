@@ -226,8 +226,30 @@ def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, d
             f"output_prefix_found={bool(saved_prefix)}. "
             "No job was submitted."
         )
-    if validate_graph(clone, info)["definite_blockers"]:
-        raise ValueError("Temporary tiny graph failed API validation; no job submitted")
+    # The one intentional handoff break: replace the original linked
+    # render_frames value with a literal nine-frame cap in this temporary
+    # graph. All remaining required handoffs and input contracts stay strict.
+    allowed_override = (
+        "AAOSceneRenderInputs.render_frames -> EmptyLTXVLatentVideo.length"
+    )
+    invalid = [
+        blocker for blocker in validate_graph(clone, info)["definite_blockers"]
+        if not (
+            blocker.get("kind") == "handoff_missing_or_wrong_source"
+            and blocker.get("handoff") == allowed_override
+            and any(
+                node["class_type"] == "EmptyLTXVLatentVideo"
+                and node["inputs"].get("length") == FRAMES
+                for node in clone.values()
+            )
+        )
+    ]
+    if invalid:
+        types = sorted(set(blocker.get("kind", "unknown") for blocker in invalid))
+        raise ValueError(
+            "Temporary tiny graph failed API validation "
+            "(blocker types: " + ", ".join(types) + "); no job submitted"
+        )
     if "LTXVEmptyLatentAudio" in classes and audio_frames < 1:
         raise ValueError("Audio latent length could not be constrained")
     return clone, {
