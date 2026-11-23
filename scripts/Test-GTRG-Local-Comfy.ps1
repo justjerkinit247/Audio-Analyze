@@ -74,7 +74,7 @@ if ($running -gt 0 -or $pending -gt 0) {
 
 # Built-in EmptyImage -> SaveImage only, 288x512 exactly 9:16.
 $prompt = @{
-    '1' = @{ class_type = 'EmptyImage'; inputs = @{ width = 288; height = 512; batch_size = 1 } }
+    '1' = @{ class_type = 'EmptyImage'; inputs = @{ width = 288; height = 512; batch_size = 1; color = 0 } }
     '2' = @{ class_type = 'SaveImage'; inputs = @{ images = @('1', 0); filename_prefix = 'GTRG_Local_Canary' } }
 }
 $payload = @{ prompt = $prompt; client_id = ([guid]::NewGuid().ToString()) } | ConvertTo-Json -Depth 20 -Compress
