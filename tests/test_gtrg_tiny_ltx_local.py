@@ -118,7 +118,7 @@ def test_reject_missing_sampler_reduction():
     try:
         m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
     except ValueError as exc:
-        assert "9-frame and 2-step" in str(exc)
+        assert "steps_or_sigmas_capped=False" in str(exc)
     else:
         raise AssertionError("Should not queue unreduced GPU generation")
 
