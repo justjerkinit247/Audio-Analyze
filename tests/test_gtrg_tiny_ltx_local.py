@@ -209,3 +209,20 @@ def test_custom_scheduler_can_be_limited_to_two_steps():
         c["class_type"] == "BetaSamplingScheduler" and c["input_name"] == "steps"
         for c in report["changed_inputs"]
     )
+
+
+def test_batch_size_forced_to_one_when_latent_nodes_support_it():
+    graph, info = fixture()
+    graph["7"]["inputs"]["batch_size"] = 4
+    graph["8"]["inputs"]["batch_size"] = 2
+    info["EmptyLTXVLatentVideo"]["input"]["required"]["batch_size"] = [
+        "INT", {"min": 1, "max": 64}
+    ]
+    info["LTXVEmptyLatentAudio"]["input"]["required"]["batch_size"] = [
+        "INT", {"min": 1, "max": 64}
+    ]
+    tiny, _ = m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    assert tiny["7"]["inputs"]["batch_size"] == 1
+    assert tiny["8"]["inputs"]["batch_size"] == 1
+    assert graph["7"]["inputs"]["batch_size"] == 4
+    assert graph["8"]["inputs"]["batch_size"] == 2
