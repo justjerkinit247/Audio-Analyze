@@ -197,3 +197,15 @@ def test_report_does_not_contain_source_widget_values():
     graph["2"]["inputs"]["SECRET_AUDIO_PATH"] = "C:/private/music/123.wav"
     clone, audit = m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
     assert "C:/private/music" not in json.dumps(audit)
+
+
+def test_custom_scheduler_can_be_limited_to_two_steps():
+    graph, info = fixture()
+    graph["9"]["class_type"] = "BetaSamplingScheduler"
+    info["BetaSamplingScheduler"] = info.pop("LTXVScheduler")
+    tiny, report = m.build_tiny(graph, info, "GTRG_Tiny_9f_test")
+    assert tiny["9"]["inputs"]["steps"] == 2
+    assert any(
+        c["class_type"] == "BetaSamplingScheduler" and c["input_name"] == "steps"
+        for c in report["changed_inputs"]
+    )
