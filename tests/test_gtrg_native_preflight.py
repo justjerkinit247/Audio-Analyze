@@ -137,3 +137,78 @@ def test_cli_refuses_nonlocal_host(monkeypatch):
     with pytest.raises(SystemExit) as error:
         m.main()
     assert error.value.code == 2
+
+
+def test_connected_dropdown_widgets_are_not_required_cables():
+    """These six inputs are selected in GUI widgets, then checked in API export."""
+    doc = fixture()
+    known = [
+        ("KSamplerSelect", ["sampler_name"]),
+        ("SaveVideo", ["format"]),
+        ("LTXAVTextEncoderLoader", ["text_encoder", "ckpt_name", "device"]),
+        ("LTXVAudioVAELoader", ["ckpt_name"]),
+    ]
+    next_id = 100
+    definitions = mock_object_info(doc)
+    for cls, names in known:
+        doc["nodes"].append({
+            "id": next_id,
+            "type": cls,
+            "inputs": [{"name": name, "link": None} for name in names],
+            "outputs": [],
+            "widgets_values": ["SECRET_SELECTED_VALUE" for _ in names],
+        })
+        definitions[cls] = {
+            "input": {"required": {name: ["ANY", {}] for name in names}},
+        }
+        next_id += 1
+    report = m.preflight_ui_document(doc, definitions, m.DEFAULT_WORKFLOW)
+    assert report["status"] == "READY_FOR_API_GRAPH_VALIDATION", report["definite_blockers"]
+    waivers = [
+        item for item in report["warnings"]
+        if item["kind"] == "widget_selection_requires_api_validation"
+    ]
+    assert len(waivers) == 6
+    assert "SECRET_SELECTED_VALUE" not in json.dumps(report)
+    assert report["is_full_video_render_verified"] is False
+
+
+def test_unknown_required_socket_remains_hard_blocker():
+    doc = fixture()
+    doc["nodes"].append({
+        "id": 300, "type": "UnknownNeedsImage",
+        "inputs": [{"name": "source_image", "link": None}],
+        "outputs": [],
+    })
+    definitions = mock_object_info(doc)
+    definitions["UnknownNeedsImage"] = {
+        "input": {"required": {"source_image": ["IMAGE", {}]}},
+    }
+    report = m.preflight_ui_document(doc, definitions, m.DEFAULT_WORKFLOW)
+    assert report["status"] == "BLOCKED_STATIC"
+    assert any(
+        issue["kind"] == "unconnected_required_socket" and
+        issue["class_type"] == "UnknownNeedsImage"
+        for issue in report["definite_blockers"]
+    )
+
+
+def test_widget_metadata_can_show_custom_input_is_not_hard_blocker():
+    doc = fixture()
+    doc["nodes"].append({
+        "id": 301, "type": "CustomComboAsSocket",
+        "inputs": [{"name": "choice", "link": None, "widget": {"name": "choice"}}],
+        "outputs": [], "widgets_values": ["SECRET_CUSTOM"],
+    })
+    definitions = mock_object_info(doc)
+    definitions["CustomComboAsSocket"] = {
+        "input": {"required": {"choice": ["CUSTOM_CHOICE_TYPE", {}]}},
+    }
+    report = m.preflight_ui_document(doc, definitions, m.DEFAULT_WORKFLOW)
+    assert report["status"] == "READY_FOR_API_GRAPH_VALIDATION", report["definite_blockers"]
+    assert any(
+        warning["kind"] == "widget_selection_requires_api_validation" and
+        warning["class_type"] == "CustomComboAsSocket"
+        for warning in report["warnings"]
+    )
+    assert "SECRET_CUSTOM" not in json.dumps(report)
