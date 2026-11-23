@@ -25,6 +25,18 @@ REMOTE_API_CLASSES = {
     "LtxApi25TextToVideo", "LTXDirectImageToVideo",
 }
 
+# In ComfyUI's saved GUI JSON these are widget/dropdown selections, not
+# mandatory graph cables. The selected values still require API-format
+# validation; this static pass deliberately does not read or print them.
+KNOWN_WIDGET_PORTS = {
+    ("KSamplerSelect", "sampler_name"),
+    ("SaveVideo", "format"),
+    ("LTXAVTextEncoderLoader", "text_encoder"),
+    ("LTXAVTextEncoderLoader", "ckpt_name"),
+    ("LTXAVTextEncoderLoader", "device"),
+    ("LTXVAudioVAELoader", "ckpt_name"),
+}
+
 
 def local_get(url: str, *, timeout: int = 25) -> Any:
     with urlopen(url, timeout=timeout) as response:
@@ -110,13 +122,24 @@ def preflight_ui_document(
         ports = _node_inputs(node)
         for input_name, input_def in required.items():
             if not _is_socket(input_def):
-                continue  # An unlinked GUI widget may satisfy a scalar/combo.
+                continue  # A scalar/enum GUI widget need not have a cable.
             socket = ports.get(input_name)
-            if not socket or socket.get("link") is None:
-                problems.append({
-                    "kind": "unconnected_required_socket",
+            if socket and socket.get("link") is not None:
+                continue
+            # Some core nodes advertise connectable dropdowns as typed inputs.
+            # No wire is needed if the GUI widget supplies the value, but
+            # we cannot infer whether its saved selection is usable here.
+            has_gui_widget = bool(socket and socket.get("widget") is not None)
+            if has_gui_widget or (cls, input_name) in KNOWN_WIDGET_PORTS:
+                cautions.append({
+                    "kind": "widget_selection_requires_api_validation",
                     "node_id": node_id, "class_type": cls, "port": input_name,
                 })
+                continue
+            problems.append({
+                "kind": "unconnected_required_socket",
+                "node_id": node_id, "class_type": cls, "port": input_name,
+            })
 
     link_ids: set[str] = set()
     links = document.get("links", [])
