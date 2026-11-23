@@ -113,11 +113,11 @@ def build_tiny(graph: dict[str, dict], info: dict, prefix: str) -> tuple[dict, d
         cls, inputs = node["class_type"], node["inputs"]
         targets: dict[str, int] = {}
         if cls in LATENT_VIDEO:
-            targets.update({"width": WIDTH, "height": HEIGHT, "length": FRAMES})
+            targets.update({"width": WIDTH, "height": HEIGHT, "length": FRAMES, "batch_size": 1})
         if cls in IMAGE_PREPROCESS:
             targets.update({"width": WIDTH, "height": HEIGHT})
         if cls in LATENT_AUDIO:
-            targets.update({"frames_number": FRAMES})
+            targets.update({"frames_number": FRAMES, "batch_size": 1})
         if cls in SAMPLERS or cls.endswith("Scheduler"):
             targets.update({"steps": STEPS, "num_steps": STEPS})
         for key, target in targets.items():
