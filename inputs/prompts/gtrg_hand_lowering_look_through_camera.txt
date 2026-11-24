@@ -1,0 +1,6 @@
+Reference image: inputs/gtrg_seed_images/file_000000006f1471fdbf15b9461fc47239.png
+
+Movement: She slowly lowers her hand from her shoulder and chest as she raises her eyes toward the camera, looking through it with a confident, sensual, distant stare.
+
+Prompt:
+Starting from the reference pose, she releases her hand from her shoulder and lets it travel slowly down across the white fur wrap and over her chest. As her hand descends, she raises her head and brings her eyes toward the camera, looking through the lens as if seeing something beyond it. Her gaze grows confident and sensual, with a clear gleam in her eyes and a distant, self-possessed expression. Her fingers and wrist move naturally as her arm follows through the gesture; her hair and fur respond to her movement. Preserve her face, dark hair, red velvet gown, white fur wrap, jewelry, and the snowy, lantern-lit street from the reference image.
