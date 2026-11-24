@@ -36,11 +36,18 @@ $options = @(
 if ($LASTEXITCODE -ne 0) { throw "Preflight failed. No render started." }
 & $python $script @options --run
 if ($LASTEXITCODE -ne 0) { throw "Full 51-frame canary failed. Read ComfyUI log." }
+& $python "$repo\scripts\verify_gtrg_local_output.py" --report $report
+if ($LASTEXITCODE -ne 0) { throw "MP4 stream/frame verification failed. Read the verification JSON." }
 ```
 
 Requires local `ollama`, the corrected exported API workflow, and local
 ComfyUI. A different plan might have a different finishing frame count:
 **re-confirm before use**. No output or model weights belong in Git.
+The verifier writes a separate `gtrg_full_51frame_result.verification.json`
+sidecar and checks that the MP4 is probeable, has exactly one 288x512 video
+stream with 51 decoded frames, and contains an audio stream. It does not
+confirm subjective playback, identify the soundtrack, or measure sync.
+`ffprobe` must be on `PATH` or supplied with `--ffprobe`.
 
 ## Phase 2 — first paid cloud compute readiness check
 
