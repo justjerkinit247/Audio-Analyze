@@ -1,0 +1,201 @@
+{
+  "id": "6fb52feb-e49c-4e92-b256-c103e2b437fd",
+  "revision": 0,
+  "last_node_id": 2,
+  "last_link_id": 1,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "AAOInputs",
+      "pos": [
+        80,
+        80
+      ],
+      "size": [
+        490,
+        330
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "audio_path",
+          "name": "audio_path",
+          "type": "STRING",
+          "widget": {
+            "name": "audio_path"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "seed_paths",
+          "name": "seed_paths",
+          "type": "STRING",
+          "widget": {
+            "name": "seed_paths"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "lyrics_path",
+          "name": "lyrics_path",
+          "type": "STRING",
+          "widget": {
+            "name": "lyrics_path"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "repo_path",
+          "name": "repo_path",
+          "type": "STRING",
+          "widget": {
+            "name": "repo_path"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "python_path",
+          "name": "python_path",
+          "type": "STRING",
+          "widget": {
+            "name": "python_path"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "inputs",
+          "name": "inputs",
+          "type": "AAO_CONFIG",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "title": "Source audio, lyrics and identity seed",
+      "properties": {
+        "Node name for S&R": "AAOInputs"
+      },
+      "widgets_values": [
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "widgets_values_named": {
+        "audio_path": "C:\\Users\\SmooveRed\\Documents\\ChatGPT\\GTRG\\Carriage-Audio-Run\\inputs\\audio\\Naughty Comes So Naturally (Mashup).mp3",
+        "seed_paths": "C:\\Users\\SmooveRed\\Documents\\ChatGPT\\GTRG\\Carriage-Audio-Run\\inputs\\ltx_seed_images\\scene_01_woman_takes_mans_hand_and_leads_him_toward_the_covered_carriage.png",
+        "lyrics_path": "",
+        "repo_path": "C:\\Users\\SmooveRed\\Documents\\Audio-Analyze",
+        "python_path": "C:\\Users\\SmooveRed\\Documents\\Audio-Analyze\\.venv\\Scripts\\python.exe"
+      }
+    },
+    {
+      "id": 2,
+      "type": "AAOContinuous",
+      "pos": [
+        670,
+        80
+      ],
+      "size": [
+        420,
+        250
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "title": "ASMO continuous generation",
+      "inputs": [
+        {
+          "name": "inputs",
+          "type": "AAO_CONFIG",
+          "link": 1
+        },
+        {
+          "name": "model",
+          "type": "COMBO",
+          "widget": {
+            "name": "model"
+          },
+          "link": null
+        },
+        {
+          "name": "duration",
+          "type": "FLOAT",
+          "widget": {
+            "name": "duration"
+          },
+          "link": null
+        },
+        {
+          "name": "fps",
+          "type": "INT",
+          "widget": {
+            "name": "fps"
+          },
+          "link": null
+        },
+        {
+          "name": "scenes",
+          "type": "INT",
+          "widget": {
+            "name": "scenes"
+          },
+          "link": null
+        },
+        {
+          "name": "attempts",
+          "type": "INT",
+          "widget": {
+            "name": "attempts"
+          },
+          "link": null
+        },
+        {
+          "name": "run_name",
+          "type": "STRING",
+          "widget": {
+            "name": "run_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "AAOContinuous"
+      },
+      "widgets_values": [
+        "ltx-2.3-22b-dev-fp8.safetensors",
+        4.0,
+        24,
+        2,
+        2,
+        "phase4-preview"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "AAO_CONFIG"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

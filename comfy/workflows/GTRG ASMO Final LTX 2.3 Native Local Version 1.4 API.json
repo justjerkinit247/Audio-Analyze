@@ -1,0 +1,27 @@
+{
+  "1": {
+    "class_type": "AAOInputs",
+    "inputs": {
+      "audio_path": "",
+      "seed_paths": "",
+      "lyrics_path": "",
+      "repo_path": "",
+      "python_path": ""
+    }
+  },
+  "2": {
+    "class_type": "AAOContinuous",
+    "inputs": {
+      "inputs": [
+        "1",
+        0
+      ],
+      "model": "ltx-2.3-22b-dev-fp8.safetensors",
+      "duration": 4.0,
+      "fps": 24,
+      "scenes": 2,
+      "attempts": 2,
+      "run_name": "phase4-preview"
+    }
+  }
+}
