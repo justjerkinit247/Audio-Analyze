@@ -17,3 +17,7 @@ The repository copy of asmo_narrative_timing.py matched the committed baseline. 
 ## Remaining validation
 
 A real two-scene 1.4 GPU render, crash/resume across an actual server restart, operator continuity review and choreography approval remain outstanding. The operator's approval of take 00002 applies to 1.3. The source audio drives planning and final output. The native model uses an empty audio latent. Separate model reload overhead has no reliable local receipt. Multi-frame conditioning and latent extension remain experimental. The installed guide node can accept extra frames, but its effect on identity or movement has not been benchmarked. Only the recovered 24 FPS profile is enabled for live use.
+
+## Final offline suite
+
+The full repository suite passed 264 tests, skipped one optional-runtime media test and emitted three audioread deprecation warnings in 62.04 seconds using Python 3.11 and a writable analysis cache. The skipped media test passed separately in the portable ComfyUI interpreter. The complete transcripts are full-regression-retry.txt, phase4-tests.txt and installed-runtime-check.txt in the local evidence directory.
