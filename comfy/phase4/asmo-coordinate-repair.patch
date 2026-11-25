@@ -1,0 +1,154 @@
+--- a/pipeline_worker.py
++++ b/pipeline_worker.py
+@@ -14,6 +14,44 @@
+     path.parent.mkdir(parents=True, exist_ok=True)
+     path.write_text(json.dumps(value, indent=2, allow_nan=False), encoding='utf-8')
+     return path
++
++
++
++# ASMO_COORDINATE_ADAPTER_V1
++def normalize_gemma_subjects(subjects):
++    import math
++    if not isinstance(subjects, list):
++        raise ValueError("Missing Gemma subject list.")
++    result = []
++    for subject in subjects:
++        box = subject.get("box")
++        if not isinstance(box, list) or len(box) != 4:
++            raise ValueError("Invalid Gemma bounding box.")
++        if any(isinstance(v, bool) or
++               not isinstance(v, (int, float)) or
++               not math.isfinite(v) or
++               not 0 <= v <= 1000 for v in box):
++            raise ValueError("Gemma coordinates outside 0-1000.")
++        y1, x1, y2, x2 = box
++        result.append(dict(subject, box=[
++            x1 / 1000, y1 / 1000,
++            x2 / 1000, y2 / 1000
++        ]))
++    return result
++
++
++def merge_coordinate_retry(source, retry):
++    subjects = source['subjects']
++    labels = [s['label'] for s in subjects]
++    returned = retry['subjects']
++    boxes = {s['label']: s['box'] for s in returned}
++    if (len(boxes) != len(returned) or
++            len(set(labels)) != len(labels) or
++            set(boxes) != set(labels)):
++        raise ValueError("Coordinate retry subject labels do not match.")
++    return dict(source, subjects=[
++        dict(s, box=boxes[s['label']]) for s in subjects
++    ])
+ 
+ 
+ def coordinate_reference(seed_path, destination):
+@@ -27,7 +65,7 @@
+         draw.line((x, 0, x, image.height - 1), fill='#77b6cf')
+         draw.line((0, y, image.width - 1, y), fill='#77b6cf')
+         for xy in ((x + 2, 2), (2, y + 2)):
+-            draw.text(xy, f'.{n}', fill='white', stroke_width=1, stroke_fill='black')
++            draw.text(xy, f'{n * 100}', fill='white', stroke_width=1, stroke_fill='black')
+     image.save(destination)
+ 
+ 
+@@ -251,8 +289,36 @@
+                 schema['required'].append('accents')
+         if shot and action in {'asmo_prepare', 'asmo_retry'}:
+             bind_shot_direction(payload['format'], shot, action, taps, learning)
++        if action == 'asmo_prepare' and not shot:
++            box_schema = payload['format']['properties']['subjects']['items']['properties']['box']
++            box_schema['items'].update(minimum=0, maximum=1000)
++            box_schema['description'] = (
++                'Four coordinates in order ymin, xmin, ymax, xmax, '
++                'normalized to a 0-1000 image grid.'
++            )
++            user = payload['messages'][-1]['content']
++            user = user.replace(
++                'Use normalized [0,1] boxes',
++                'Use normalized 0-1000 boxes'
++            ).replace(
++                '[x1,y1,x2,y2]',
++                '[ymin,xmin,ymax,xmax]'
++            )
++            user += (
++                '\nMANDATORY COORDINATE CONTRACT: '
++                'Return box coordinates in ymin,xmin,ymax,xmax order. '
++                'Use 0-1000 independently on each axis, '
++                'not pixels and not fractions. '
++                'Grid labels 100 through 900 are direct coordinates. Origin is top-left. X increases rightward and Y increases downward. Require xmin < xmax and ymin < ymax. Check every box against these rules before returning it. '
++                'Locate subjects in the current scene seed. '
++                'Original movement and camera instructions override '
++                'generated descriptions and historical prompts. '
++                'Do not repeat actions already completed.'
++            )
++            payload['messages'][-1]['content'] = user
+         diagnostic_root=Path(plan.get('native_session') or Path(plan['plan_path']).parent)/'asmo_gemma'
+         previous_diagnostics = []
++        coordinate_retry_source = None
+         attempts = 2 if action in {'asmo_prepare', 'asmo_retry'} else 1
+         for attempt in range(attempts):
+             response = client._post_chat(payload)
+@@ -266,7 +332,15 @@
+             try:
+                 data = extract_json_object(diagnostic['raw_content'])
+                 diagnostic['parsed'] = data
++                if coordinate_retry_source is not None:
++                    data = merge_coordinate_retry(
++                        coordinate_retry_source, data)
++                    diagnostic['coordinate_retry_merged'] = data
+                 if action in {'asmo_prepare','asmo_retry'}:
++                    if action == 'asmo_prepare' and not shot:
++                        data = dict(data, subjects=normalize_gemma_subjects(
++                            data.get('subjects')))
++                        diagnostic['normalized_subjects'] = data['subjects']
+                     prepared = learning.validate_preparation(dict(positive=data.get('positive'),
+                         subjects=data.get('subjects') if action == 'asmo_prepare' else options['subjects']))
+                     if shot:
+@@ -283,6 +357,35 @@
+                 if attempt + 1 == attempts:
+                     raise ValueError(f'Gemma returned invalid {action} output: {error}. Evidence: {diagnostic_path}') from error
+                 previous_diagnostics.append(str(diagnostic_path))
++
++                # ASMO_COORDINATE_RETRY_V2
++                if (action == 'asmo_prepare' and not shot
++                        and str(error) == 'Subject box is invalid or too small.'
++                        and isinstance(diagnostic.get('parsed'), dict)):
++                    coordinate_retry_source = diagnostic['parsed']
++                    names = [s['label'] for s in
++                             coordinate_retry_source['subjects']]
++                    grid = diagnostic_path.with_suffix('.grid.jpg')
++                    coordinate_reference(path, grid)
++
++                    payload['messages'] = [{
++                        'role': 'user',
++                        'content': (
++                            'Locate each requested foreground subject in this image. '
++                            'Use these exact subject labels: ' + json.dumps(names) + '. '
++                            'Return one box around each visible body or entity. '
++                            'Coordinate order: ymin,xmin,ymax,xmax. '
++                            'Use the numbered 0-1000 grid. '
++                            'X increases rightward and Y downward. '
++                            'xmin must be smaller than xmax. '
++                            'ymin must be smaller than ymax. '
++                            'Complete the required JSON fields.'
++                        ),
++                        'images': [encode_image_base64(str(grid))]
++                    }]
++                    payload['options'] = dict(
++                        payload.get('options') or {}, temperature=0)
++                    continue
+                 correction = (f'\nThe previous response failed validation: {error}. Re-examine the original image and '
+                               f'correct the response. Prior JSON: {diagnostic["raw_content"][:2500]}')
+                 if action == 'asmo_prepare':
+@@ -290,7 +393,7 @@
+                     coordinate_reference(path, grid)
+                     payload['messages'][-1]['images'].append(encode_image_base64(str(grid)))
+                     correction += (' The second image has a coordinate grid. Read x from left to right and y from top to bottom. '
+-                                   'Return left, top, right and bottom edges of each actual visible body including its clothing. '
++                                   'Return edges in the coordinate order and scale required by the current schema, covering each visible body and its clothing. '
+                                    'Cover the body, not a hand, a vertical sliver or the whole scene.')
+                 payload['messages'][-1]['content'] = user + correction
+         if action in {'asmo_prepare','asmo_retry'}:
